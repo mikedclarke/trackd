@@ -1,0 +1,7 @@
+/trackd
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+dist/
+.DS_Store
