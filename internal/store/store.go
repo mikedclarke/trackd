@@ -69,6 +69,11 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Path() string { return s.path }
 
+func (s *Store) Ping() error {
+	var n int
+	return s.db.QueryRow("SELECT 1").Scan(&n)
+}
+
 func loadMigrations() ([]migration, error) {
 	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {

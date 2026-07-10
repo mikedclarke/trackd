@@ -6,6 +6,8 @@ linters:
       # Deferred closes on read paths and rollback-after-error are intentional
       # best-effort calls; write-path closes are checked explicitly.
       exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
         - (*database/sql.DB).Close
         - (*database/sql.Rows).Close
         - (*database/sql.Tx).Rollback

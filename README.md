@@ -27,8 +27,20 @@ Design principles:
 
 ## Quickstart
 
-Pre-release: build from source with `go build`, or wait for the first tagged
-release.
+Pre-release: build from source with `go build`, then:
+
+    trackd serve --db trackd.db --backup-dir backups
+
+The first run prints an admin API token (shown exactly once). Everything speaks
+JSON over `/api/v1` with bearer auth:
+
+    curl -s localhost:8484/api/v1/issues \
+      -H "Authorization: Bearer $TRACKD_TOKEN" \
+      -d '{"title": "First issue", "status": "Todo", "labels": ["agent-ready"]}'
+
+Add a token per agent with `trackd token add <name>` and each one's writes are
+attributed automatically; pass an explicit `"actor"` field to override.
+`/healthz` reports database health and the age of the last verified backup.
 
 ## License
 
