@@ -1,0 +1,128 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Backup writes a verified snapshot of the live database into dir and returns
+// its path. Snapshots are full databases produced by VACUUM INTO and checked
+// with PRAGMA integrity_check before being reported as successful.
+func (s *Store) Backup(dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
+	dest := filepath.Join(dir, fmt.Sprintf("trackd-%s.db", stamp))
+	// Same-second backups get a numeric suffix rather than an error.
+	for n := 2; ; n++ {
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			break
+		}
+		dest = filepath.Join(dir, fmt.Sprintf("trackd-%s-%d.db", stamp, n))
+	}
+	return s.vacuumInto(dest)
+}
+
+func (s *Store) vacuumInto(dest string) (string, error) {
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("snapshot target %s already exists", dest)
+	}
+	if _, err := s.db.Exec("VACUUM INTO ?", dest); err != nil {
+		return "", err
+	}
+	if err := verifyIntegrity(dest); err != nil {
+		os.Remove(dest)
+		return "", fmt.Errorf("snapshot failed integrity check: %w", err)
+	}
+	return dest, nil
+}
+
+func verifyIntegrity(path string) error {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var result string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity_check: %s", result)
+	}
+	return nil
+}
+
+// PruneBackups removes the oldest trackd-*.db snapshots in dir beyond keep,
+// ordered by modification time. It returns the removed paths.
+func PruneBackups(dir string, keep int) ([]string, error) {
+	if keep < 1 {
+		return nil, fmt.Errorf("keep must be >= 1, got %d", keep)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	type snap struct {
+		path string
+		mod  time.Time
+	}
+	var snaps []snap
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "trackd-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return nil, err
+		}
+		snaps = append(snaps, snap{path: filepath.Join(dir, name), mod: info.ModTime()})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].mod.After(snaps[j].mod) })
+	var removed []string
+	for _, old := range snaps[min(keep, len(snaps)):] {
+		if err := os.Remove(old.path); err != nil {
+			return removed, err
+		}
+		removed = append(removed, old.path)
+	}
+	return removed, nil
+}
+
+// Restore copies a verified snapshot to dbPath. It refuses to overwrite an
+// existing database: moving the old file aside first is a deliberate step.
+func Restore(snapshot, dbPath string) error {
+	if err := verifyIntegrity(snapshot); err != nil {
+		return fmt.Errorf("refusing to restore: %w", err)
+	}
+	if _, err := os.Stat(dbPath); err == nil {
+		return fmt.Errorf("refusing to overwrite existing database %s; move it aside first", dbPath)
+	}
+	src, err := os.Open(snapshot)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(dbPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		os.Remove(dbPath)
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		dst.Close()
+		return err
+	}
+	return dst.Close()
+}

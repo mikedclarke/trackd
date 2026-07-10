@@ -1,0 +1,133 @@
+package store
+
+import "encoding/json"
+
+type Status struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Position int    `json:"position"`
+}
+
+type Project struct {
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Slug        string   `json:"slug"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	Labels      []string `json:"labels"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+	ArchivedAt  string   `json:"archived_at,omitempty"`
+}
+
+type Issue struct {
+	ID          int64    `json:"id"`
+	Key         string   `json:"key"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Status      string   `json:"status"`
+	StatusType  string   `json:"status_type"`
+	Priority    int      `json:"priority"`
+	Project     string   `json:"project,omitempty"`
+	Parent      string   `json:"parent,omitempty"`
+	DueDate     string   `json:"due_date,omitempty"`
+	Labels      []string `json:"labels"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+	StartedAt   string   `json:"started_at,omitempty"`
+	CompletedAt string   `json:"completed_at,omitempty"`
+	CanceledAt  string   `json:"canceled_at,omitempty"`
+	ArchivedAt  string   `json:"archived_at,omitempty"`
+}
+
+type Comment struct {
+	ID        int64  `json:"id"`
+	IssueKey  string `json:"issue_key"`
+	Body      string `json:"body"`
+	Actor     string `json:"actor,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type Relation struct {
+	IssueKey   string `json:"issue_key"`
+	RelatedKey string `json:"related_key"`
+	Type       string `json:"type"`
+}
+
+type Label struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color,omitempty"`
+}
+
+type Token struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+	CreatedAt  string `json:"created_at"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	RevokedAt  string `json:"revoked_at,omitempty"`
+}
+
+type Event struct {
+	ID        int64           `json:"id"`
+	Entity    string          `json:"entity"`
+	EntityID  int64           `json:"entity_id"`
+	Actor     string          `json:"actor,omitempty"`
+	Action    string          `json:"action"`
+	Before    json.RawMessage `json:"before,omitempty"`
+	After     json.RawMessage `json:"after,omitempty"`
+	CreatedAt string          `json:"created_at"`
+}
+
+type IssueInput struct {
+	Title       string
+	Description string
+	Status      string
+	Priority    int
+	Project     string
+	Parent      string
+	DueDate     string
+	Labels      []string
+}
+
+type IssuePatch struct {
+	Title       *string
+	Description *string
+	Status      *string
+	Priority    *int
+	Project     *string
+	Parent      *string
+	DueDate     *string
+	Labels      *[]string
+	Archived    *bool
+}
+
+type IssueFilter struct {
+	Status          string
+	StatusType      string
+	Project         string
+	Label           string
+	Parent          string
+	Query           string
+	UpdatedSince    string
+	IncludeArchived bool
+	Limit           int
+	Offset          int
+}
+
+type ProjectInput struct {
+	Name        string
+	Slug        string
+	Description string
+	Status      string
+}
+
+type ProjectPatch struct {
+	Name        *string
+	Description *string
+	Status      *string
+	Archived    *bool
+}
