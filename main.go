@@ -38,6 +38,16 @@ func run(args []string) error {
 		return nil
 	case "serve":
 		return cmdServe(rest)
+	case "issue":
+		return cmdIssue(rest)
+	case "project":
+		return cmdProject(rest)
+	case "label":
+		return cmdLabel(rest)
+	case "statuses":
+		return cmdStatuses(rest)
+	case "health":
+		return cmdHealth(rest)
 	case "token":
 		return cmdToken(rest)
 	case "backup":
@@ -282,16 +292,25 @@ func usage() {
 Usage:
   trackd <command> [flags]
 
-Commands:
+Server commands (operate on the database file directly):
   serve     run the server                             (--db, --addr, --backup-dir, --backup-every, --backup-keep)
   token     manage API tokens: add | list | revoke     (--db, --role)
   backup    write a verified snapshot of the database  (--db, --to, --keep)
   restore   restore a snapshot to a new database file  (--db)
   export    dump the full database as JSONL            (--db, --out)
   import    load a dump into a new database            (--db) <format> <file>
+
+Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_TOKEN):
+  issue     list | show | create | update | comment | relate | events
+  project   list | show | create | update
+  label     list | add
+  statuses  list workflow statuses
+  health    show server health
+
   version   print the version
   help      show this help
 
+All client commands accept --json for machine-readable output.
 The database path defaults to $TRACKD_DB, then ./trackd.db.
 `)
 }
