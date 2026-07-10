@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var tokenRoles = map[string]bool{"admin": true, "agent": true}
@@ -56,10 +57,22 @@ func (s *Store) VerifyToken(plaintext string) (*Token, error) {
 	if subtle.ConstantTimeCompare([]byte(hash), []byte(storedHash)) != 1 {
 		return nil, errors.New("invalid token")
 	}
-	if _, err := s.db.Exec("UPDATE tokens SET last_used_at = ? WHERE id = ?", now(), t.ID); err != nil {
-		return nil, err
+	// last_used_at is a coarse signal; refreshing at most once a minute avoids
+	// a synchronous write on every authenticated request.
+	if stale(t.LastUsedAt, time.Minute) {
+		if _, err := s.db.Exec("UPDATE tokens SET last_used_at = ? WHERE id = ?", now(), t.ID); err != nil {
+			return nil, err
+		}
 	}
 	return &t, nil
+}
+
+func stale(ts string, d time.Duration) bool {
+	if ts == "" {
+		return true
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	return err != nil || time.Since(t) >= d
 }
 
 func (s *Store) RevokeToken(name string) error {

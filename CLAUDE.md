@@ -12,9 +12,17 @@ CLI, MCP endpoint, embedded read-only web UI.
 
 ## Architecture
 
-- `main.go` — entry point and subcommand dispatch
+- `main.go` — entry point, subcommand dispatch, server-side commands (serve,
+  token, backup, restore, export, import)
+- `cli.go` — client commands (issue, project, label, statuses, health) that talk
+  HTTP to a running server
 - `internal/store` — SQLite storage layer: schema migrations, CRUD, audit events,
-  backup/restore, JSONL export/import. All writes go through this package.
+  backup/restore, JSONL export/import, Linear CSV importer. All writes go through
+  this package.
+- `internal/server` — HTTP layer: REST API + bearer auth, MCP endpoint
+  (`mcp.go`), embedded zero-JS web UI (`ui.go`, templates in `ui/`), backup
+  scheduler
+- `internal/client` — thin HTTP client used by the CLI
 
 ## Hard rules
 
