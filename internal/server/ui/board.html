@@ -1,0 +1,58 @@
+{{define "content"}}
+<form class="filters" method="get" action="/">
+  <label>project
+    <select name="project">
+      <option value="">all</option>
+      {{$project := .Project}}
+      {{range .Projects}}<option value="{{.Slug}}" {{if eq .Slug $project}}selected{{end}}>{{.Slug}}</option>{{end}}
+    </select>
+  </label>
+  <label>label
+    <select name="label">
+      <option value="">all</option>
+      {{$label := .Label}}
+      {{range .Labels}}<option value="{{.Name}}" {{if eq .Name $label}}selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+  </label>
+  <button type="submit">apply</button>
+  <span class="filter-count">{{.Count}} issues</span>
+</form>
+
+{{if .Count}}
+<div class="board">
+  {{range .Columns}}
+  <section class="column type-{{.Status.Type}}">
+    <h2 class="column-head"><span class="dot"></span>{{.Status.Name}} <span class="count">[{{.Total}}]</span></h2>
+    <div class="cards">
+      {{range .Issues}}
+      <a class="card" href="/ui/issue/{{.Key}}">
+        <div class="card-meta">
+          <span class="key">{{.Key}}</span>
+          {{if eq .Priority 1}}<span class="prio p1">P1</span>{{else if eq .Priority 2}}<span class="prio p2">P2</span>{{else if eq .Priority 3}}<span class="prio p3">P3</span>{{else if eq .Priority 4}}<span class="prio p4">P4</span>{{end}}
+        </div>
+        <div class="card-title">{{.Title}}</div>
+        {{if or .Project .Labels}}
+        <div class="card-tags">
+          {{if .Project}}<span class="tag project-tag">{{.Project}}</span>{{end}}
+          {{range .Labels}}<span class="tag">{{.}}</span>{{end}}
+        </div>
+        {{end}}
+      </a>
+      {{end}}
+      {{if .More}}<div class="more">+ {{.More}} more, newest first</div>{{end}}
+      {{if not .Issues}}<div class="empty-column">—</div>{{end}}
+    </div>
+  </section>
+  {{end}}
+</div>
+{{else}}
+<div class="empty-board">
+  {{if or .Project .Label}}
+  <p>Nothing matches these filters.</p>
+  {{else}}
+  <p>No issues yet.</p>
+  <p class="hint">trackd issue create --title "First issue"</p>
+  {{end}}
+</div>
+{{end}}
+{{end}}

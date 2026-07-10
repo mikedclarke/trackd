@@ -1,0 +1,51 @@
+{{define "content"}}
+<p class="crumbs"><a href="/">← board</a></p>
+
+<article class="issue">
+  <div class="issue-head type-{{.Issue.StatusType}}">
+    <span class="key">{{.Issue.Key}}</span>
+    <span class="status"><span class="dot"></span>{{.Issue.Status}}</span>
+    {{if eq .Issue.Priority 1}}<span class="prio p1">P1 urgent</span>{{else if eq .Issue.Priority 2}}<span class="prio p2">P2 high</span>{{else if eq .Issue.Priority 3}}<span class="prio p3">P3 medium</span>{{else if eq .Issue.Priority 4}}<span class="prio p4">P4 low</span>{{end}}
+    {{if .Issue.ArchivedAt}}<span class="archived">archived</span>{{end}}
+  </div>
+  <h1>{{.Issue.Title}}</h1>
+
+  <dl class="meta">
+    {{if .Issue.Project}}<div><dt>project</dt><dd><a href="/?project={{.Issue.Project}}">{{.Issue.Project}}</a></dd></div>{{end}}
+    {{if .Issue.Parent}}<div><dt>parent</dt><dd><a href="/ui/issue/{{.Issue.Parent}}">{{.Issue.Parent}}</a></dd></div>{{end}}
+    {{if .Issue.DueDate}}<div><dt>due</dt><dd>{{.Issue.DueDate}}</dd></div>{{end}}
+    {{if .Issue.Labels}}<div><dt>labels</dt><dd>{{range .Issue.Labels}}<span class="tag">{{.}}</span>{{end}}</dd></div>{{end}}
+    <div><dt>created</dt><dd>{{shortTime .Issue.CreatedAt}}</dd></div>
+    <div><dt>updated</dt><dd>{{shortTime .Issue.UpdatedAt}}</dd></div>
+  </dl>
+
+  {{if .Issue.Description}}<div class="description">{{.Issue.Description}}</div>{{end}}
+
+  {{if .Relations}}
+  <h2>relations</h2>
+  <ul class="relations">
+    {{range .Relations}}<li><a href="/ui/issue/{{.IssueKey}}">{{.IssueKey}}</a> {{.Type}} <a href="/ui/issue/{{.RelatedKey}}">{{.RelatedKey}}</a></li>{{end}}
+  </ul>
+  {{end}}
+
+  {{if .Comments}}
+  <h2>comments</h2>
+  <div class="comments">
+    {{range .Comments}}
+    <div class="comment">
+      <div class="comment-head"><span class="actor">{{if .Actor}}{{.Actor}}{{else}}unknown{{end}}</span> <span class="when">{{shortTime .CreatedAt}}</span></div>
+      <div class="comment-body">{{.Body}}</div>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+
+  {{if .Events}}
+  <h2>activity</h2>
+  <div class="log">
+    {{range .Events}}<div class="log-line"><span class="when">{{shortTime .CreatedAt}}</span> <span class="action">{{.Action}}</span>{{if .Actor}} <span class="actor">{{.Actor}}</span>{{end}}</div>
+    {{end}}
+  </div>
+  {{end}}
+</article>
+{{end}}

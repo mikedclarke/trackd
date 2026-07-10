@@ -58,6 +58,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.Handle("/api/", s.auth(api))
 	mux.Handle("/mcp", s.auth(s.mcpHandler()))
+	mux.HandleFunc("GET /{$}", s.uiAuth(s.uiBoard))
+	mux.HandleFunc("GET /ui/issue/{key}", s.uiAuth(s.uiIssue))
+	mux.HandleFunc("GET /ui/login", s.uiLoginForm)
+	mux.HandleFunc("POST /ui/login", s.uiLoginSubmit)
+	mux.HandleFunc("GET /ui/logout", s.uiLogout)
+	mux.HandleFunc("GET /ui/static/style.css", s.uiStyle)
 	return logRequests(mux)
 }
 

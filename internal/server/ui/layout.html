@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trackd · {{.Title}}</title>
+<link rel="stylesheet" href="/ui/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="wordmark" href="/">trackd<span class="cursor">▮</span></a>
+  {{if .Workspace}}<span class="workspace">{{.Workspace}}</span>{{end}}
+  <nav class="topnav">
+    <a href="/healthz">health</a>
+    <a href="/ui/logout">sign out</a>
+  </nav>
+</header>
+<main>
+{{template "content" .}}
+</main>
+</body>
+</html>
