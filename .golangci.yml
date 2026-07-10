@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Deferred closes on read paths and rollback-after-error are intentional
+      # best-effort calls; write-path closes are checked explicitly.
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (*github.com/mikedclarke/trackd/internal/store.Store).Close

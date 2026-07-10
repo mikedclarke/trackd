@@ -38,7 +38,7 @@ func (s *Store) vacuumInto(dest string) (string, error) {
 		return "", err
 	}
 	if err := verifyIntegrity(dest); err != nil {
-		os.Remove(dest)
+		_ = os.Remove(dest)
 		return "", fmt.Errorf("snapshot failed integrity check: %w", err)
 	}
 	return dest, nil
@@ -126,7 +126,7 @@ func Restore(snapshot, dbPath string) error {
 	}
 	if _, err := io.Copy(dst, src); err != nil {
 		dst.Close()
-		os.Remove(dbPath)
+		_ = os.Remove(dbPath)
 		return err
 	}
 	if err := dst.Sync(); err != nil {

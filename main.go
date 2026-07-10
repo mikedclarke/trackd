@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/mikedclarke/trackd/internal/store"
@@ -110,16 +109,19 @@ func cmdExport(args []string) error {
 		return err
 	}
 	defer s.Close()
-	var w io.Writer = os.Stdout
-	if *out != "" {
-		f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		w = f
+	if *out == "" {
+		return s.ExportDump(os.Stdout)
 	}
-	return s.ExportDump(w)
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := s.ExportDump(f); err != nil {
+		f.Close()
+		return err
+	}
+	// A close error here means the dump may be incomplete on disk.
+	return f.Close()
 }
 
 func cmdImport(args []string) error {
