@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -255,11 +256,13 @@ func cmdExport(args []string) error {
 func cmdImport(args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	db := fs.String("db", defaultDB(), "database path (must be new or empty)")
+	actor := fs.String("actor", "linear-import", "actor recorded on imported issues (linear only)")
+	dryRun := fs.Bool("dry-run", false, "parse and validate, report counts, write nothing (linear only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: trackd import [--db <path>] <format> <file> (formats: trackd)")
+		return fmt.Errorf("usage: trackd import [--db <path>] <format> <file> (formats: trackd, linear)")
 	}
 	format, path := fs.Arg(0), fs.Arg(1)
 	f, err := os.Open(path)
@@ -277,13 +280,33 @@ func cmdImport(args []string) error {
 		if err := s.ImportDump(f); err != nil {
 			return err
 		}
+		fmt.Println("imported", path, "into", *db)
+		return nil
 	case "linear":
-		return fmt.Errorf("linear import is not implemented yet")
+		stats, err := s.ImportLinearCSV(f, *actor, *dryRun)
+		if err != nil {
+			return err
+		}
+		verb := "imported"
+		if *dryRun {
+			verb = "dry run: would import"
+		}
+		fmt.Printf("%s %d issues, %d projects, %d labels into %s\n", verb, stats.Issues, stats.Projects, stats.Labels, *db)
+		for typ, n := range stats.Relations {
+			fmt.Printf("  relations (%s): %d\n", typ, n)
+		}
+		if len(stats.StatusesCreated) > 0 {
+			fmt.Printf("  statuses created: %s\n", strings.Join(stats.StatusesCreated, ", "))
+		}
+		fmt.Printf("  issue keys continue from %s-%d\n", stats.Prefix, stats.Seq+1)
+		for _, s := range stats.Skipped {
+			fmt.Println("  skipped:", s)
+		}
+		fmt.Println("note: Linear CSV exports do not include comments; comments are not migrated")
+		return nil
 	default:
-		return fmt.Errorf("unknown import format %q (formats: trackd)", format)
+		return fmt.Errorf("unknown import format %q (formats: trackd, linear)", format)
 	}
-	fmt.Println("imported", path, "into", *db)
-	return nil
 }
 
 func usage() {
