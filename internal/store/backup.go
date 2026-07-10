@@ -45,6 +45,15 @@ func (s *Store) vacuumInto(dest string) (string, error) {
 }
 
 func verifyIntegrity(path string) error {
+	// Opening a missing path would silently create an empty database, and an
+	// empty database passes integrity_check; require a real file first.
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("%s is empty", path)
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return err
