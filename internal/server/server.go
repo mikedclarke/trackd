@@ -57,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.Handle("/api/", s.auth(api))
+	mux.Handle("/mcp", s.auth(s.mcpHandler()))
 	return logRequests(mux)
 }
 
