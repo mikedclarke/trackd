@@ -337,7 +337,7 @@ func TestMigrationSnapshot(t *testing.T) {
 	}
 	var snapshot string
 	for _, e := range entries {
-		if strings.Contains(e.Name(), ".pre-migrate-v1-") {
+		if strings.Contains(e.Name(), ".pre-migrate-v") {
 			snapshot = filepath.Join(dir, e.Name())
 		}
 	}

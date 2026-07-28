@@ -31,6 +31,8 @@ type Issue struct {
 	Priority    int      `json:"priority"`
 	Project     string   `json:"project,omitempty"`
 	Parent      string   `json:"parent,omitempty"`
+	Assignee    string   `json:"assignee,omitempty"`
+	Milestone   string   `json:"milestone,omitempty"`
 	DueDate     string   `json:"due_date,omitempty"`
 	Labels      []string `json:"labels"`
 	CreatedAt   string   `json:"created_at"`
@@ -89,6 +91,8 @@ type IssueInput struct {
 	Priority    int
 	Project     string
 	Parent      string
+	Assignee    string
+	Milestone   string
 	DueDate     string
 	Labels      []string
 }
@@ -100,6 +104,8 @@ type IssuePatch struct {
 	Priority    *int
 	Project     *string
 	Parent      *string
+	Assignee    *string
+	Milestone   *string
 	DueDate     *string
 	Labels      *[]string
 	Archived    *bool
@@ -111,11 +117,38 @@ type IssueFilter struct {
 	Project         string
 	Label           string
 	Parent          string
+	Assignee        string
+	Milestone       string
 	Query           string
 	UpdatedSince    string
 	IncludeArchived bool
 	Limit           int
 	Offset          int
+}
+
+type Milestone struct {
+	ID          int64  `json:"id"`
+	Project     string `json:"project"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	TargetDate  string `json:"target_date,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	ArchivedAt  string `json:"archived_at,omitempty"`
+}
+
+type MilestoneInput struct {
+	Project     string
+	Name        string
+	Description string
+	TargetDate  string
+}
+
+type MilestonePatch struct {
+	Name        *string
+	Description *string
+	TargetDate  *string
+	Archived    *bool
 }
 
 type ProjectInput struct {

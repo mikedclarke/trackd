@@ -37,11 +37,15 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, error) {
 		if err != nil {
 			return err
 		}
+		milestoneID, err := optionalMilestoneID(tx, in.Project, in.Milestone)
+		if err != nil {
+			return err
+		}
 		ts := now()
 		res, err := tx.Exec(`
-			INSERT INTO issues (key, title, description, status_id, priority, project_id, parent_id, due_date, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			key, in.Title, in.Description, st.ID, in.Priority, projectID, parentID, nullable(in.DueDate), ts, ts,
+			INSERT INTO issues (key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			key, in.Title, in.Description, st.ID, in.Priority, projectID, parentID, in.Assignee, milestoneID, nullable(in.DueDate), ts, ts,
 		)
 		if err != nil {
 			return err
@@ -120,6 +124,25 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 				return err
 			}
 			sets, args = append(sets, "project_id = ?"), append(args, projectID)
+			// Milestones belong to a project: moving the issue clears its
+			// milestone unless the patch also sets one valid in the new project.
+			if p.Milestone == nil && before.Milestone != "" {
+				sets = append(sets, "milestone_id = NULL")
+			}
+		}
+		if p.Assignee != nil {
+			sets, args = append(sets, "assignee = ?"), append(args, *p.Assignee)
+		}
+		if p.Milestone != nil {
+			project := before.Project
+			if p.Project != nil {
+				project = *p.Project
+			}
+			milestoneID, err := optionalMilestoneID(tx, project, *p.Milestone)
+			if err != nil {
+				return err
+			}
+			sets, args = append(sets, "milestone_id = ?"), append(args, milestoneID)
 		}
 		if p.Parent != nil {
 			if *p.Parent == key {
@@ -178,6 +201,12 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 	}
 	if f.Parent != "" {
 		where, args = append(where, "pi.key = ?"), append(args, f.Parent)
+	}
+	if f.Assignee != "" {
+		where, args = append(where, "i.assignee = ?"), append(args, f.Assignee)
+	}
+	if f.Milestone != "" {
+		where, args = append(where, "m.name = ?"), append(args, f.Milestone)
 	}
 	if f.Label != "" {
 		where = append(where, "EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id AND l.name = ?)")
@@ -370,6 +399,24 @@ func (s *Store) ListRelations(issueKey string) ([]Relation, error) {
 	return out, err
 }
 
+// ListAssignees returns the distinct assignees on unarchived issues.
+func (s *Store) ListAssignees() ([]string, error) {
+	rows, err := s.db.Query("SELECT DISTINCT assignee FROM issues WHERE assignee != '' AND archived_at IS NULL ORDER BY assignee")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListStatuses() ([]Status, error) {
 	rows, err := s.db.Query("SELECT id, name, type, position FROM statuses ORDER BY position")
 	if err != nil {
@@ -389,14 +436,16 @@ func (s *Store) ListStatuses() ([]Status, error) {
 
 const issueSelect = `
 	SELECT i.id, i.key, i.title, i.description, s.name, s.type, i.priority,
-	       COALESCE(p.slug, ''), COALESCE(pi.key, ''), COALESCE(i.due_date, ''),
+	       COALESCE(p.slug, ''), COALESCE(pi.key, ''), i.assignee, COALESCE(m.name, ''),
+	       COALESCE(i.due_date, ''),
 	       i.created_at, i.updated_at,
 	       COALESCE(i.started_at, ''), COALESCE(i.completed_at, ''),
 	       COALESCE(i.canceled_at, ''), COALESCE(i.archived_at, '')
 	FROM issues i
 	JOIN statuses s ON s.id = i.status_id
 	LEFT JOIN projects p ON p.id = i.project_id
-	LEFT JOIN issues pi ON pi.id = i.parent_id`
+	LEFT JOIN issues pi ON pi.id = i.parent_id
+	LEFT JOIN milestones m ON m.id = i.milestone_id`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -404,7 +453,7 @@ func scanIssue(r rowScanner) (*Issue, error) {
 	var i Issue
 	err := r.Scan(
 		&i.ID, &i.Key, &i.Title, &i.Description, &i.Status, &i.StatusType, &i.Priority,
-		&i.Project, &i.Parent, &i.DueDate,
+		&i.Project, &i.Parent, &i.Assignee, &i.Milestone, &i.DueDate,
 		&i.CreatedAt, &i.UpdatedAt,
 		&i.StartedAt, &i.CompletedAt, &i.CanceledAt, &i.ArchivedAt,
 	)

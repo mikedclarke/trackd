@@ -159,6 +159,7 @@ main { padding: 16px 20px 40px; }
   padding: 0 5px;
 }
 .project-tag { color: var(--unstarted); }
+.assignee-tag { color: var(--started); }
 .more, .empty-column { color: var(--dim); padding: 4px 2px; font-size: 12px; }
 
 .empty-board { padding: 60px 0; text-align: center; color: var(--muted); }

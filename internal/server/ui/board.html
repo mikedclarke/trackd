@@ -14,6 +14,13 @@
       {{range .Labels}}<option value="{{.Name}}" {{if eq .Name $label}}selected{{end}}>{{.Name}}</option>{{end}}
     </select>
   </label>
+  <label>assignee
+    <select name="assignee">
+      <option value="">all</option>
+      {{$assignee := .Assignee}}
+      {{range .Assignees}}<option value="{{.}}" {{if eq . $assignee}}selected{{end}}>{{.}}</option>{{end}}
+    </select>
+  </label>
   <button type="submit">apply</button>
   <span class="filter-count">{{.Count}} issues</span>
 </form>
@@ -31,9 +38,10 @@
           {{if eq .Priority 1}}<span class="prio p1">P1</span>{{else if eq .Priority 2}}<span class="prio p2">P2</span>{{else if eq .Priority 3}}<span class="prio p3">P3</span>{{else if eq .Priority 4}}<span class="prio p4">P4</span>{{end}}
         </div>
         <div class="card-title">{{.Title}}</div>
-        {{if or .Project .Labels}}
+        {{if or .Project .Labels .Assignee}}
         <div class="card-tags">
           {{if .Project}}<span class="tag project-tag">{{.Project}}</span>{{end}}
+          {{if .Assignee}}<span class="tag assignee-tag">{{.Assignee}}</span>{{end}}
           {{range .Labels}}<span class="tag">{{.}}</span>{{end}}
         </div>
         {{end}}

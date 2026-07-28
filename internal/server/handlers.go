@@ -17,6 +17,8 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		Project:         q.Get("project"),
 		Label:           q.Get("label"),
 		Parent:          q.Get("parent"),
+		Assignee:        q.Get("assignee"),
+		Milestone:       q.Get("milestone"),
 		Query:           q.Get("q"),
 		UpdatedSince:    q.Get("updated_since"),
 		IncludeArchived: q.Get("archived") == "true",
@@ -40,6 +42,8 @@ type issueCreateReq struct {
 	Priority    int      `json:"priority"`
 	Project     string   `json:"project"`
 	Parent      string   `json:"parent"`
+	Assignee    string   `json:"assignee"`
+	Milestone   string   `json:"milestone"`
 	DueDate     string   `json:"due_date"`
 	Labels      []string `json:"labels"`
 	Actor       string   `json:"actor"`
@@ -58,6 +62,8 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		Priority:    req.Priority,
 		Project:     req.Project,
 		Parent:      req.Parent,
+		Assignee:    req.Assignee,
+		Milestone:   req.Milestone,
 		DueDate:     req.DueDate,
 		Labels:      req.Labels,
 	}, actor(r, req.Actor))
@@ -84,6 +90,8 @@ type issuePatchReq struct {
 	Priority    *int      `json:"priority"`
 	Project     *string   `json:"project"`
 	Parent      *string   `json:"parent"`
+	Assignee    *string   `json:"assignee"`
+	Milestone   *string   `json:"milestone"`
 	DueDate     *string   `json:"due_date"`
 	Labels      *[]string `json:"labels"`
 	Archived    *bool     `json:"archived"`
@@ -92,7 +100,8 @@ type issuePatchReq struct {
 
 func (p issuePatchReq) empty() bool {
 	return p.Title == nil && p.Description == nil && p.Status == nil && p.Priority == nil &&
-		p.Project == nil && p.Parent == nil && p.DueDate == nil && p.Labels == nil && p.Archived == nil
+		p.Project == nil && p.Parent == nil && p.Assignee == nil && p.Milestone == nil &&
+		p.DueDate == nil && p.Labels == nil && p.Archived == nil
 }
 
 func (s *Server) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +121,8 @@ func (s *Server) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
 		Priority:    req.Priority,
 		Project:     req.Project,
 		Parent:      req.Parent,
+		Assignee:    req.Assignee,
+		Milestone:   req.Milestone,
 		DueDate:     req.DueDate,
 		Labels:      req.Labels,
 		Archived:    req.Archived,
@@ -323,6 +334,96 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, project)
+}
+
+func (s *Server) handleListMilestones(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	milestones, err := s.store.ListMilestones(q.Get("project"), q.Get("archived") == "true")
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if milestones == nil {
+		milestones = []store.Milestone{}
+	}
+	writeJSON(w, http.StatusOK, milestones)
+}
+
+type milestoneCreateReq struct {
+	Project     string `json:"project"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	TargetDate  string `json:"target_date"`
+	Actor       string `json:"actor"`
+}
+
+func (s *Server) handleCreateMilestone(w http.ResponseWriter, r *http.Request) {
+	var req milestoneCreateReq
+	if err := decodeBody(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	milestone, err := s.store.CreateMilestone(store.MilestoneInput{
+		Project:     req.Project,
+		Name:        req.Name,
+		Description: req.Description,
+		TargetDate:  req.TargetDate,
+	}, actor(r, req.Actor))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, milestone)
+}
+
+func (s *Server) handleGetMilestone(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "milestone id must be a number")
+		return
+	}
+	milestone, err := s.store.GetMilestone(id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, milestone)
+}
+
+type milestonePatchReq struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	TargetDate  *string `json:"target_date"`
+	Archived    *bool   `json:"archived"`
+	Actor       string  `json:"actor"`
+}
+
+func (s *Server) handlePatchMilestone(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "milestone id must be a number")
+		return
+	}
+	var req milestonePatchReq
+	if err := decodeBody(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Name == nil && req.Description == nil && req.TargetDate == nil && req.Archived == nil {
+		writeError(w, http.StatusBadRequest, "empty patch: no fields to update")
+		return
+	}
+	milestone, err := s.store.UpdateMilestone(id, store.MilestonePatch{
+		Name:        req.Name,
+		Description: req.Description,
+		TargetDate:  req.TargetDate,
+		Archived:    req.Archived,
+	}, actor(r, req.Actor))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, milestone)
 }
 
 func (s *Server) handleListLabels(w http.ResponseWriter, r *http.Request) {

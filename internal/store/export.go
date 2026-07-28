@@ -52,6 +52,18 @@ type dumpLabel struct {
 	Color  string `json:"color"`
 }
 
+type dumpMilestone struct {
+	Record      string  `json:"record"`
+	ID          int64   `json:"id"`
+	ProjectID   int64   `json:"project_id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	TargetDate  *string `json:"target_date,omitempty"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+	ArchivedAt  *string `json:"archived_at,omitempty"`
+}
+
 type dumpIssue struct {
 	Record      string  `json:"record"`
 	ID          int64   `json:"id"`
@@ -62,6 +74,8 @@ type dumpIssue struct {
 	Priority    int     `json:"priority"`
 	ProjectID   *int64  `json:"project_id,omitempty"`
 	ParentID    *int64  `json:"parent_id,omitempty"`
+	Assignee    string  `json:"assignee,omitempty"`
+	MilestoneID *int64  `json:"milestone_id,omitempty"`
 	DueDate     *string `json:"due_date,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
@@ -164,9 +178,15 @@ func (s *Store) ExportDump(w io.Writer) error {
 		}, write); err != nil {
 			return err
 		}
-		if err := exportRows(tx, "SELECT id, key, title, description, status_id, priority, project_id, parent_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at FROM issues ORDER BY id", func(scan rowScanner) (any, error) {
+		if err := exportRows(tx, "SELECT id, project_id, name, description, target_date, created_at, updated_at, archived_at FROM milestones ORDER BY id", func(scan rowScanner) (any, error) {
+			r := dumpMilestone{Record: "milestone"}
+			return r, scan.Scan(&r.ID, &r.ProjectID, &r.Name, &r.Description, &r.TargetDate, &r.CreatedAt, &r.UpdatedAt, &r.ArchivedAt)
+		}, write); err != nil {
+			return err
+		}
+		if err := exportRows(tx, "SELECT id, key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at FROM issues ORDER BY id", func(scan rowScanner) (any, error) {
 			r := dumpIssue{Record: "issue"}
-			return r, scan.Scan(&r.ID, &r.Key, &r.Title, &r.Description, &r.StatusID, &r.Priority, &r.ProjectID, &r.ParentID, &r.DueDate, &r.CreatedAt, &r.UpdatedAt, &r.StartedAt, &r.CompletedAt, &r.CanceledAt, &r.ArchivedAt)
+			return r, scan.Scan(&r.ID, &r.Key, &r.Title, &r.Description, &r.StatusID, &r.Priority, &r.ProjectID, &r.ParentID, &r.Assignee, &r.MilestoneID, &r.DueDate, &r.CreatedAt, &r.UpdatedAt, &r.StartedAt, &r.CompletedAt, &r.CanceledAt, &r.ArchivedAt)
 		}, write); err != nil {
 			return err
 		}
@@ -339,14 +359,24 @@ func importLine(tx *sql.Tx, line []byte) error {
 		}
 		_, err := tx.Exec("INSERT INTO labels (id, name, color) VALUES (?, ?, ?)", r.ID, r.Name, r.Color)
 		return err
+	case "milestone":
+		var r dumpMilestone
+		if err := json.Unmarshal(line, &r); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			"INSERT INTO milestones (id, project_id, name, description, target_date, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			r.ID, r.ProjectID, r.Name, r.Description, r.TargetDate, r.CreatedAt, r.UpdatedAt, r.ArchivedAt,
+		)
+		return err
 	case "issue":
 		var r dumpIssue
 		if err := json.Unmarshal(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec(
-			"INSERT INTO issues (id, key, title, description, status_id, priority, project_id, parent_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			r.ID, r.Key, r.Title, r.Description, r.StatusID, r.Priority, r.ProjectID, r.ParentID, r.DueDate, r.CreatedAt, r.UpdatedAt, r.StartedAt, r.CompletedAt, r.CanceledAt, r.ArchivedAt,
+			"INSERT INTO issues (id, key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			r.ID, r.Key, r.Title, r.Description, r.StatusID, r.Priority, r.ProjectID, r.ParentID, r.Assignee, r.MilestoneID, r.DueDate, r.CreatedAt, r.UpdatedAt, r.StartedAt, r.CompletedAt, r.CanceledAt, r.ArchivedAt,
 		)
 		return err
 	case "issue_label":

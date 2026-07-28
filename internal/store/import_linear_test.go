@@ -9,7 +9,7 @@ import (
 // issue export.
 const linearFixture = `"ID","Team","Title","Description","Status","Estimate","Priority","Project ID","Project","Creator","Assignee","Labels","Cycle Number","Cycle Name","Cycle Start","Cycle End","Created","Updated","Started","Triaged","Completed","Canceled","Archived","Due Date","Parent issue","Initiatives","Project Milestone ID","Project Milestone","SLA Status","UUID","Time in status (minutes)","Related to","Blocked by","Duplicate of"
 "GDL-1","GDL","Rebuild service pages","Line one
-line two — “quotes” ✓","In Progress","","High","uuid-1","Site Rebuild","Mike","Mike","claude-ready, seo","","","","","Wed May 13 2026 11:21:41 GMT+0000 (GMT+00:00)","Wed Jul 01 2026 11:51:28 GMT+0000 (GMT+00:00)","Thu May 14 2026 09:00:00 GMT+0000 (GMT+00:00)","","","","","Thu Jun 25 2026 23:00:00 GMT+0000 (GMT+00:00)","","","","","","u1","10","GDL-2","",""
+line two — “quotes” ✓","In Progress","","High","uuid-1","Site Rebuild","Mike","Mike","claude-ready, seo","","","","","Wed May 13 2026 11:21:41 GMT+0000 (GMT+00:00)","Wed Jul 01 2026 11:51:28 GMT+0000 (GMT+00:00)","Thu May 14 2026 09:00:00 GMT+0000 (GMT+00:00)","","","","","Thu Jun 25 2026 23:00:00 GMT+0000 (GMT+00:00)","","","m-uuid-1","Launch","","u1","10","GDL-2","",""
 "GDL-2","GDL","Child task","","Done","","Medium","uuid-1","Site Rebuild","Mike","Mike","","","","","","Wed May 13 2026 11:25:00 GMT+0000 (GMT+00:00)","Wed Jul 01 2026 12:10:54 GMT+0000 (GMT+00:00)","","","Wed Jul 01 2026 12:10:54 GMT+0000 (GMT+00:00)","","","","GDL-1","","","","","u2","5","GDL-1","GDL-4",""
 "GDL-3","GDL","Old duplicate","","Duplicate","","No priority","","","Mike","","","","","","","Wed May 13 2026 11:30:00 GMT+0000 (GMT+00:00)","Wed May 20 2026 10:00:00 GMT+0000 (GMT+00:00)","","","","Wed May 20 2026 10:00:00 GMT+0000 (GMT+00:00)","","","","","","","","u3","1","","","GDL-1"
 "GDL-4","GDL","Archived one","","QA Check","","Urgent","uuid-2","Other Project","Mike","","ops","","","","","Wed May 13 2026 11:31:00 GMT+0000 (GMT+00:00)","Thu May 21 2026 14:10:53 GMT+0000 (GMT+00:00)","","","","","Thu May 21 2026 14:10:53 GMT+0000 (GMT+00:00)","","","","","","","u4","2","","",""
@@ -24,6 +24,16 @@ func TestImportLinearCSV(t *testing.T) {
 	}
 	if stats.Issues != 5 || stats.Projects != 2 || stats.Labels != 3 {
 		t.Fatalf("stats = %+v", stats)
+	}
+	if stats.Milestones != 1 || stats.Assignees != 1 {
+		t.Errorf("milestones = %d, assignees = %d, want 1 and 1", stats.Milestones, stats.Assignees)
+	}
+	imported, err := s.GetIssue("GDL-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported.Assignee != "Mike" || imported.Milestone != "Launch" {
+		t.Errorf("GDL-1 assignee=%q milestone=%q, want Mike and Launch", imported.Assignee, imported.Milestone)
 	}
 	// GDL-1 related GDL-2 appears on both rows but must import once; GDL-2 is
 	// blocked by GDL-4; GDL-3 duplicates GDL-1.

@@ -13,6 +13,8 @@
   <dl class="meta">
     {{if .Issue.Project}}<div><dt>project</dt><dd><a href="/?project={{.Issue.Project}}">{{.Issue.Project}}</a></dd></div>{{end}}
     {{if .Issue.Parent}}<div><dt>parent</dt><dd><a href="/ui/issue/{{.Issue.Parent}}">{{.Issue.Parent}}</a></dd></div>{{end}}
+    {{if .Issue.Assignee}}<div><dt>assignee</dt><dd><a href="/?assignee={{.Issue.Assignee}}">{{.Issue.Assignee}}</a></dd></div>{{end}}
+    {{if .Issue.Milestone}}<div><dt>milestone</dt><dd>{{.Issue.Milestone}}</dd></div>{{end}}
     {{if .Issue.DueDate}}<div><dt>due</dt><dd>{{.Issue.DueDate}}</dd></div>{{end}}
     {{if .Issue.Labels}}<div><dt>labels</dt><dd>{{range .Issue.Labels}}<span class="tag">{{.}}</span>{{end}}</dd></div>{{end}}
     <div><dt>created</dt><dd>{{shortTime .Issue.CreatedAt}}</dd></div>

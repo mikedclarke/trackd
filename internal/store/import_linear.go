@@ -17,6 +17,8 @@ type LinearImportStats struct {
 	Issues          int            `json:"issues"`
 	Projects        int            `json:"projects"`
 	Labels          int            `json:"labels"`
+	Milestones      int            `json:"milestones"`
+	Assignees       int            `json:"assignees"`
 	Relations       map[string]int `json:"relations"`
 	StatusesCreated []string       `json:"statuses_created,omitempty"`
 	Prefix          string         `json:"prefix"`
@@ -52,6 +54,8 @@ type linearRow struct {
 	status      string
 	priority    int
 	project     string
+	assignee    string
+	milestone   string
 	labels      []string
 	parent      string
 	relatedTo   []string
@@ -183,6 +187,34 @@ func (s *Store) importLinearRows(tx *sql.Tx, rows []linearRow, actor string, sta
 		stats.Projects++
 	}
 
+	// Milestones, deduped per project. Linear scopes them to a project; rows
+	// with a milestone but no project can't keep it.
+	milestoneIDs := map[string]int64{}
+	assigneesSeen := map[string]bool{}
+	for _, row := range rows {
+		if row.milestone == "" || row.project == "" {
+			continue
+		}
+		mkey := row.project + "\x00" + row.milestone
+		if _, ok := milestoneIDs[mkey]; ok {
+			continue
+		}
+		ts := now()
+		res, err := tx.Exec(
+			"INSERT INTO milestones (project_id, name, description, created_at, updated_at) VALUES (?, ?, '', ?, ?)",
+			projectIDs[row.project], row.milestone, ts, ts,
+		)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		milestoneIDs[mkey] = id
+		stats.Milestones++
+	}
+
 	// First pass: issues and labels.
 	issueIDs := map[string]int64{}
 	labelSeen := map[string]bool{}
@@ -190,6 +222,18 @@ func (s *Store) importLinearRows(tx *sql.Tx, rows []linearRow, actor string, sta
 		var projectID any
 		if row.project != "" {
 			projectID = projectIDs[row.project]
+		}
+		var milestoneID any
+		if row.milestone != "" {
+			if row.project == "" {
+				stats.Skipped = append(stats.Skipped, fmt.Sprintf("%s: milestone %q dropped (issue has no project)", row.key, row.milestone))
+			} else {
+				milestoneID = milestoneIDs[row.project+"\x00"+row.milestone]
+			}
+		}
+		if row.assignee != "" && !assigneesSeen[row.assignee] {
+			assigneesSeen[row.assignee] = true
+			stats.Assignees++
 		}
 		createdAt := row.createdAt
 		if createdAt == "" {
@@ -200,9 +244,9 @@ func (s *Store) importLinearRows(tx *sql.Tx, rows []linearRow, actor string, sta
 			updatedAt = createdAt
 		}
 		res, err := tx.Exec(`
-			INSERT INTO issues (key, title, description, status_id, priority, project_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			row.key, row.title, row.description, statusIDs[row.status], row.priority, projectID,
+			INSERT INTO issues (key, title, description, status_id, priority, project_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			row.key, row.title, row.description, statusIDs[row.status], row.priority, projectID, row.assignee, milestoneID,
 			nullable(row.dueDate), createdAt, updatedAt,
 			nullable(row.startedAt), nullable(row.completedAt), nullable(row.canceledAt), nullable(row.archivedAt),
 		)
@@ -369,11 +413,16 @@ func parseLinearCSV(r io.Reader) ([]linearRow, error) {
 			description: get(record, "Description"),
 			status:      get(record, "Status"),
 			project:     get(record, "Project"),
+			assignee:    get(record, "Assignee"),
+			milestone:   get(record, "Project Milestone"),
 			labels:      splitKeys(get(record, "Labels")),
 			parent:      get(record, "Parent issue"),
 			relatedTo:   splitKeys(get(record, "Related to")),
 			blockedBy:   splitKeys(get(record, "Blocked by")),
 			duplicateOf: get(record, "Duplicate of"),
+		}
+		if row.milestone == "" {
+			row.milestone = get(record, "Milestone")
 		}
 		if row.key == "" {
 			return nil, fmt.Errorf("line %d: empty issue ID", line)

@@ -28,6 +28,8 @@ type mcpListIssuesIn struct {
 	Project         string `json:"project,omitempty" jsonschema:"filter by project slug"`
 	Label           string `json:"label,omitempty" jsonschema:"filter by label name"`
 	Parent          string `json:"parent,omitempty" jsonschema:"filter by parent issue key"`
+	Assignee        string `json:"assignee,omitempty" jsonschema:"filter by assignee name"`
+	Milestone       string `json:"milestone,omitempty" jsonschema:"filter by milestone name"`
 	Query           string `json:"query,omitempty" jsonschema:"substring search over key, title, and description"`
 	UpdatedSince    string `json:"updated_since,omitempty" jsonschema:"only issues updated at or after this RFC3339 timestamp"`
 	IncludeArchived bool   `json:"include_archived,omitempty" jsonschema:"include archived issues"`
@@ -57,6 +59,8 @@ type mcpSaveIssueIn struct {
 	Priority    *int     `json:"priority,omitempty" jsonschema:"priority 0-4: 0 none, 1 urgent, 2 high, 3 medium, 4 low"`
 	Project     *string  `json:"project,omitempty" jsonschema:"project slug; empty string clears"`
 	Parent      *string  `json:"parent,omitempty" jsonschema:"parent issue key; empty string clears"`
+	Assignee    *string  `json:"assignee,omitempty" jsonschema:"assignee name (person or agent); empty string clears"`
+	Milestone   *string  `json:"milestone,omitempty" jsonschema:"milestone name within the issue's project; empty string clears"`
 	DueDate     *string  `json:"due_date,omitempty" jsonschema:"due date YYYY-MM-DD; empty string clears"`
 	Labels      []string `json:"labels,omitempty" jsonschema:"replaces the full label set; omit to leave unchanged"`
 	Archived    *bool    `json:"archived,omitempty" jsonschema:"archive or unarchive the issue"`
@@ -91,6 +95,25 @@ type mcpLabelsOut struct {
 	Labels []store.Label `json:"labels"`
 }
 
+type mcpListMilestonesIn struct {
+	Project         string `json:"project,omitempty" jsonschema:"filter by project slug"`
+	IncludeArchived bool   `json:"include_archived,omitempty" jsonschema:"include archived milestones"`
+}
+
+type mcpMilestonesOut struct {
+	Milestones []store.Milestone `json:"milestones"`
+}
+
+type mcpSaveMilestoneIn struct {
+	ID          int64   `json:"id,omitempty" jsonschema:"milestone id to update; omit to create a new milestone"`
+	Project     string  `json:"project,omitempty" jsonschema:"project slug the milestone belongs to (required when creating)"`
+	Name        *string `json:"name,omitempty" jsonschema:"milestone name (required when creating)"`
+	Description *string `json:"description,omitempty" jsonschema:"milestone description"`
+	TargetDate  *string `json:"target_date,omitempty" jsonschema:"target date YYYY-MM-DD; empty string clears"`
+	Archived    *bool   `json:"archived,omitempty" jsonschema:"archive or unarchive the milestone"`
+	Actor       string  `json:"actor,omitempty" jsonschema:"actor recorded on the audit trail; defaults to the API token's name"`
+}
+
 func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "trackd", Title: "trackd", Version: s.version}, nil)
 	resolve := func(explicit string) string {
@@ -110,6 +133,8 @@ func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 			Project:         in.Project,
 			Label:           in.Label,
 			Parent:          in.Parent,
+			Assignee:        in.Assignee,
+			Milestone:       in.Milestone,
 			Query:           in.Query,
 			UpdatedSince:    in.UpdatedSince,
 			IncludeArchived: in.IncludeArchived,
@@ -161,6 +186,8 @@ func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 				Priority:    intOr(in.Priority),
 				Project:     strOr(in.Project),
 				Parent:      strOr(in.Parent),
+				Assignee:    strOr(in.Assignee),
+				Milestone:   strOr(in.Milestone),
 				DueDate:     strOr(in.DueDate),
 				Labels:      in.Labels,
 			}, act)
@@ -176,6 +203,8 @@ func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 			Priority:    in.Priority,
 			Project:     in.Project,
 			Parent:      in.Parent,
+			Assignee:    in.Assignee,
+			Milestone:   in.Milestone,
 			DueDate:     in.DueDate,
 			Archived:    in.Archived,
 		}
@@ -247,6 +276,46 @@ func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 			}
 		}
 		return nil, *project, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_milestones",
+		Description: "List milestones, optionally filtered by project.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListMilestonesIn) (*mcp.CallToolResult, mcpMilestonesOut, error) {
+		milestones, err := s.store.ListMilestones(in.Project, in.IncludeArchived)
+		if milestones == nil {
+			milestones = []store.Milestone{}
+		}
+		return nil, mcpMilestonesOut{Milestones: milestones}, err
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "save_milestone",
+		Description: "Create a milestone (omit id, pass project and name) or update an existing one (pass id). Only provided fields change.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveMilestoneIn) (*mcp.CallToolResult, store.Milestone, error) {
+		act := resolve(in.Actor)
+		if in.ID == 0 {
+			milestone, err := s.store.CreateMilestone(store.MilestoneInput{
+				Project:     in.Project,
+				Name:        strOr(in.Name),
+				Description: strOr(in.Description),
+				TargetDate:  strOr(in.TargetDate),
+			}, act)
+			if err != nil {
+				return nil, store.Milestone{}, err
+			}
+			return nil, *milestone, nil
+		}
+		milestone, err := s.store.UpdateMilestone(in.ID, store.MilestonePatch{
+			Name:        in.Name,
+			Description: in.Description,
+			TargetDate:  in.TargetDate,
+			Archived:    in.Archived,
+		}, act)
+		if err != nil {
+			return nil, store.Milestone{}, err
+		}
+		return nil, *milestone, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{

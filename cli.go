@@ -121,6 +121,8 @@ func issueList(args []string) error {
 	project := fs.String("project", "", "filter by project slug")
 	label := fs.String("label", "", "filter by label")
 	parent := fs.String("parent", "", "filter by parent issue key")
+	assignee := fs.String("assignee", "", "filter by assignee name")
+	milestone := fs.String("milestone", "", "filter by milestone name")
 	query := fs.String("q", "", "substring search over key, title, and description")
 	updatedSince := fs.String("updated-since", "", "only issues updated at or after this RFC3339 time")
 	archived := fs.Bool("archived", false, "include archived issues")
@@ -132,7 +134,8 @@ func issueList(args []string) error {
 	q := url.Values{}
 	for k, v := range map[string]string{
 		"status": *status, "status_type": *statusType, "project": *project,
-		"label": *label, "parent": *parent, "q": *query, "updated_since": *updatedSince,
+		"label": *label, "parent": *parent, "assignee": *assignee, "milestone": *milestone,
+		"q": *query, "updated_since": *updatedSince,
 	} {
 		if v != "" {
 			q.Set(k, v)
@@ -155,10 +158,10 @@ func issueList(args []string) error {
 		return printJSON(issues)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "KEY\tSTATUS\tPRI\tPROJECT\tLABELS\tTITLE")
+	fmt.Fprintln(w, "KEY\tSTATUS\tPRI\tPROJECT\tASSIGNEE\tLABELS\tTITLE")
 	for _, i := range issues {
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
-			i.Key, i.Status, i.Priority, i.Project, strings.Join(i.Labels, ","), truncate(i.Title, 70))
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			i.Key, i.Status, i.Priority, i.Project, i.Assignee, strings.Join(i.Labels, ","), truncate(i.Title, 70))
 	}
 	return w.Flush()
 }
@@ -194,6 +197,7 @@ func issueShow(args []string) error {
 	fmt.Println(issue.Title)
 	fmt.Println()
 	fmt.Printf("project: %s  parent: %s  due: %s\n", orDash(issue.Project), orDash(issue.Parent), orDash(issue.DueDate))
+	fmt.Printf("assignee: %s  milestone: %s\n", orDash(issue.Assignee), orDash(issue.Milestone))
 	fmt.Printf("labels:  %s\n", orDash(strings.Join(issue.Labels, ",")))
 	fmt.Printf("created: %s  updated: %s\n", issue.CreatedAt, issue.UpdatedAt)
 	if issue.ArchivedAt != "" {
@@ -233,6 +237,8 @@ func issueCreate(args []string) error {
 	priority := fs.Int("priority", 0, "priority 0-4 (0 none, 1 urgent, 4 low)")
 	project := fs.String("project", "", "project slug")
 	parent := fs.String("parent", "", "parent issue key")
+	assignee := fs.String("assignee", "", "assignee name (person or agent)")
+	milestone := fs.String("milestone", "", "milestone name within the project")
 	due := fs.String("due", "", "due date (YYYY-MM-DD)")
 	var labels stringSlice
 	fs.Var(&labels, "label", "label to apply (repeatable)")
@@ -259,6 +265,12 @@ func issueCreate(args []string) error {
 	}
 	if *parent != "" {
 		body["parent"] = *parent
+	}
+	if *assignee != "" {
+		body["assignee"] = *assignee
+	}
+	if *milestone != "" {
+		body["milestone"] = *milestone
 	}
 	if *due != "" {
 		body["due_date"] = *due
@@ -293,6 +305,8 @@ func issueUpdate(args []string) error {
 	priority := fs.Int("priority", 0, "new priority 0-4")
 	project := fs.String("project", "", "project slug; empty string clears")
 	parent := fs.String("parent", "", "parent issue key; empty string clears")
+	assignee := fs.String("assignee", "", "assignee name; empty string clears")
+	milestone := fs.String("milestone", "", "milestone name; empty string clears")
 	due := fs.String("due", "", "due date; empty string clears")
 	labelsCSV := fs.String("labels", "", "comma-separated labels, replacing the current set; empty string clears")
 	archive := fs.Bool("archive", false, "archive the issue")
@@ -326,6 +340,12 @@ func issueUpdate(args []string) error {
 	}
 	if set["parent"] {
 		body["parent"] = *parent
+	}
+	if set["assignee"] {
+		body["assignee"] = *assignee
+	}
+	if set["milestone"] {
+		body["milestone"] = *milestone
 	}
 	if set["due"] {
 		body["due_date"] = *due
@@ -668,6 +688,121 @@ func cmdLabel(args []string) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown label subcommand %q", sub)
+	}
+}
+
+func cmdMilestone(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: trackd milestone <list|create|update> [flags]")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		fs := flag.NewFlagSet("milestone list", flag.ContinueOnError)
+		common := addCommon(fs)
+		project := fs.String("project", "", "filter by project slug")
+		archived := fs.Bool("archived", false, "include archived milestones")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		q := url.Values{}
+		if *project != "" {
+			q.Set("project", *project)
+		}
+		if *archived {
+			q.Set("archived", "true")
+		}
+		var milestones []store.Milestone
+		if err := common.client().Do("GET", "/api/v1/milestones", q, nil, &milestones); err != nil {
+			return err
+		}
+		if *common.jsonOut {
+			return printJSON(milestones)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tPROJECT\tNAME\tTARGET\tARCHIVED")
+		for _, m := range milestones {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", m.ID, m.Project, m.Name, orDash(m.TargetDate), m.ArchivedAt)
+		}
+		return w.Flush()
+	case "create":
+		fs := flag.NewFlagSet("milestone create", flag.ContinueOnError)
+		common := addCommon(fs)
+		project := fs.String("project", "", "project slug (required)")
+		name := fs.String("name", "", "milestone name (required)")
+		description := fs.String("description", "", "milestone description")
+		target := fs.String("target", "", "target date (YYYY-MM-DD)")
+		actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		body := map[string]any{"project": *project, "name": *name}
+		if *description != "" {
+			body["description"] = *description
+		}
+		if *target != "" {
+			body["target_date"] = *target
+		}
+		if *actor != "" {
+			body["actor"] = *actor
+		}
+		var milestone store.Milestone
+		if err := common.client().Do("POST", "/api/v1/milestones", nil, body, &milestone); err != nil {
+			return err
+		}
+		if *common.jsonOut {
+			return printJSON(milestone)
+		}
+		fmt.Printf("milestone %d: %s (%s)\n", milestone.ID, milestone.Name, milestone.Project)
+		return nil
+	case "update":
+		lead, rest, err := leadingArgs(rest, 1, "trackd milestone update <id> [flags]")
+		if err != nil {
+			return err
+		}
+		fs := flag.NewFlagSet("milestone update", flag.ContinueOnError)
+		common := addCommon(fs)
+		name := fs.String("name", "", "new name")
+		description := fs.String("description", "", "new description")
+		target := fs.String("target", "", "target date; empty string clears")
+		archive := fs.Bool("archive", false, "archive the milestone")
+		unarchive := fs.Bool("unarchive", false, "unarchive the milestone")
+		actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		set := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		body := map[string]any{}
+		if set["name"] {
+			body["name"] = *name
+		}
+		if set["description"] {
+			body["description"] = *description
+		}
+		if set["target"] {
+			body["target_date"] = *target
+		}
+		if *archive {
+			body["archived"] = true
+		}
+		if *unarchive {
+			body["archived"] = false
+		}
+		if *actor != "" {
+			body["actor"] = *actor
+		}
+		var milestone store.Milestone
+		if err := common.client().Do("PATCH", "/api/v1/milestones/"+lead[0], nil, body, &milestone); err != nil {
+			return err
+		}
+		if *common.jsonOut {
+			return printJSON(milestone)
+		}
+		fmt.Printf("milestone %d updated\n", milestone.ID)
+		return nil
+	default:
+		return fmt.Errorf("unknown milestone subcommand %q", sub)
 	}
 }
 

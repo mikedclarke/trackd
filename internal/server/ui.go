@@ -108,7 +108,8 @@ type boardColumn struct {
 func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	label := r.URL.Query().Get("label")
-	issues, err := s.store.ListIssues(store.IssueFilter{Project: project, Label: label, Limit: 5000})
+	assignee := r.URL.Query().Get("assignee")
+	issues, err := s.store.ListIssues(store.IssueFilter{Project: project, Label: label, Assignee: assignee, Limit: 5000})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -124,6 +125,13 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	labels, err := s.store.ListLabels()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Assignee filter options come from the full issue set, not the filtered
+	// one, so picking an assignee doesn't empty the dropdown.
+	assignees, err := s.store.ListAssignees()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -160,8 +168,10 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 		"Columns":   columns,
 		"Projects":  projects,
 		"Labels":    labels,
+		"Assignees": assignees,
 		"Project":   project,
 		"Label":     label,
+		"Assignee":  assignee,
 		"Count":     len(issues),
 	})
 }

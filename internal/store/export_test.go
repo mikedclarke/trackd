@@ -16,12 +16,17 @@ func populate(t *testing.T, s *Store) {
 	if _, err := s.SetProjectLabels("site-rebuild", []string{"client-x"}, "pm"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.CreateMilestone(MilestoneInput{Project: "site-rebuild", Name: "Launch", TargetDate: "2026-09-01"}, "pm"); err != nil {
+		t.Fatal(err)
+	}
 	a, err := s.CreateIssue(IssueInput{
 		Title:       "Fix header — “quotes” & unicode ✓",
 		Description: "line one\nline two\t<html> {\"json\": true}",
 		Status:      "Todo",
 		Priority:    2,
 		Project:     "site-rebuild",
+		Assignee:    "engineer",
+		Milestone:   "Launch",
 		DueDate:     "2026-08-01",
 		Labels:      []string{"agent-ready"},
 	}, "pm")

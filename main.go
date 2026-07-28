@@ -45,6 +45,8 @@ func run(args []string) error {
 		return cmdProject(rest)
 	case "label":
 		return cmdLabel(rest)
+	case "milestone":
+		return cmdMilestone(rest)
 	case "statuses":
 		return cmdStatuses(rest)
 	case "health":
@@ -327,6 +329,7 @@ Server commands (operate on the database file directly):
 Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_TOKEN):
   issue     list | show | create | update | comment | relate | events
   project   list | show | create | update
+  milestone list | create | update
   label     list | add
   statuses  list workflow statuses
   health    show server health
