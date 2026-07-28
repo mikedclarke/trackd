@@ -82,6 +82,7 @@ func cmdServe(args []string) error {
 	backupDir := fs.String("backup-dir", "", "snapshot directory; enables the backup scheduler")
 	backupEvery := fs.Duration("backup-every", 24*time.Hour, "interval between scheduled backups")
 	backupKeep := fs.Int("backup-keep", 14, "scheduled backups to retain (0 = never prune)")
+	backupTimeout := fs.Duration("backup-timeout", 10*time.Minute, "abandon a backup run that exceeds this")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -106,7 +107,7 @@ func cmdServe(args []string) error {
 	srv := server.New(st, version)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go srv.RunBackups(ctx, server.BackupConfig{Dir: *backupDir, Every: *backupEvery, Keep: *backupKeep})
+	go srv.RunBackups(ctx, server.BackupConfig{Dir: *backupDir, Every: *backupEvery, Keep: *backupKeep, Timeout: *backupTimeout})
 
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	shutdownDone := make(chan struct{})
@@ -316,7 +317,7 @@ Usage:
   trackd <command> [flags]
 
 Server commands (operate on the database file directly):
-  serve     run the server                             (--db, --addr, --backup-dir, --backup-every, --backup-keep)
+  serve     run the server                             (--db, --addr, --backup-dir, --backup-every, --backup-keep, --backup-timeout)
   token     manage API tokens: add | list | revoke     (--db, --role)
   backup    write a verified snapshot of the database  (--db, --to, --keep)
   restore   restore a snapshot to a new database file  (--db)

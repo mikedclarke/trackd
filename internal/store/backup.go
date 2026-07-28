@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -15,8 +16,19 @@ import (
 // its path. Snapshots are full databases produced by VACUUM INTO and checked
 // with PRAGMA integrity_check before being reported as successful.
 func (s *Store) Backup(dir string) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+	return s.BackupContext(context.Background(), dir)
+}
+
+// BackupContext is Backup bounded by ctx. The snapshot runs on its own
+// database connection, never the store's serialized one, so a slow or hung
+// backup cannot block other store operations. Directories that hang on file
+// operations (network mounts, macOS privacy-protected folders) are detected
+// by a writability probe before any database work starts; if ctx expires the
+// attempt is abandoned and any partial snapshot is removed once the wedged
+// operation eventually returns.
+func (s *Store) BackupContext(ctx context.Context, dir string) (string, error) {
+	if err := probeWritable(ctx, dir); err != nil {
+		return "", fmt.Errorf("backup dir %s is not writable: %w (if this times out on macOS, grant trackd access to the folder in System Settings > Privacy & Security)", dir, err)
 	}
 	stamp := time.Now().UTC().Format("20060102-150405")
 	dest := filepath.Join(dir, fmt.Sprintf("trackd-%s.db", stamp))
@@ -27,21 +39,79 @@ func (s *Store) Backup(dir string) (string, error) {
 		}
 		dest = filepath.Join(dir, fmt.Sprintf("trackd-%s-%d.db", stamp, n))
 	}
-	return s.vacuumInto(dest)
+	return s.vacuumIntoContext(ctx, dest)
+}
+
+// probeWritable proves dir accepts file creation before any snapshot work
+// begins. The filesystem calls run in a goroutine because a blocked directory
+// can hang them indefinitely rather than erroring; the caller gives up when
+// ctx expires and the goroutine cleans up after itself if it ever completes.
+func probeWritable(ctx context.Context, dir string) error {
+	done := make(chan error, 1)
+	go func() {
+		err := os.MkdirAll(dir, 0o755)
+		if err == nil {
+			probe := filepath.Join(dir, ".trackd-probe")
+			err = os.WriteFile(probe, []byte("probe"), 0o644)
+			if err == nil {
+				_ = os.Remove(probe)
+			}
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Store) vacuumInto(dest string) (string, error) {
+	return s.vacuumIntoContext(context.Background(), dest)
+}
+
+func (s *Store) vacuumIntoContext(ctx context.Context, dest string) (string, error) {
 	if _, err := os.Stat(dest); err == nil {
 		return "", fmt.Errorf("snapshot target %s already exists", dest)
 	}
-	if _, err := s.db.Exec("VACUUM INTO ?", dest); err != nil {
-		return "", err
+	done := make(chan error, 1)
+	go func() {
+		done <- func() error {
+			db, err := sql.Open("sqlite", s.path)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
+			if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
+				return err
+			}
+			if err := verifyIntegrity(dest); err != nil {
+				_ = os.Remove(dest)
+				return fmt.Errorf("snapshot failed integrity check: %w", err)
+			}
+			return nil
+		}()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			return "", err
+		}
+		return dest, nil
+	case <-ctx.Done():
+		// The goroutine may be wedged in an uninterruptible filesystem call;
+		// discard whatever it produces whenever it finally returns.
+		go func() {
+			if err := <-done; err == nil {
+				_ = os.Remove(dest)
+			}
+		}()
+		return "", ctx.Err()
 	}
-	if err := verifyIntegrity(dest); err != nil {
-		_ = os.Remove(dest)
-		return "", fmt.Errorf("snapshot failed integrity check: %w", err)
-	}
-	return dest, nil
 }
 
 func verifyIntegrity(path string) error {

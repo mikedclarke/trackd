@@ -133,6 +133,10 @@ type BackupConfig struct {
 	Dir   string
 	Every time.Duration
 	Keep  int
+	// Timeout bounds each backup run; 0 means a 10 minute default. A run that
+	// exceeds it is abandoned and recorded as a failure — it must never block
+	// the next run or, via the store, API traffic.
+	Timeout time.Duration
 }
 
 // RunBackups snapshots the database immediately and then on every tick until
@@ -141,23 +145,36 @@ func (s *Server) RunBackups(ctx context.Context, cfg BackupConfig) {
 	if cfg.Dir == "" {
 		return
 	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
 	run := func() {
-		path, err := s.store.Backup(cfg.Dir)
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		path, err := s.store.BackupContext(runCtx, cfg.Dir)
+		s.mu.Lock()
 		status := backupStatus{At: time.Now(), Path: path}
 		if err != nil {
-			status = backupStatus{Error: err.Error()}
-			log.Printf("backup failed: %v", err)
+			// Keep the last successful snapshot visible in /healthz alongside
+			// the error, so a failing scheduler is diagnosable at a glance.
+			status = s.lastBackup
+			status.Error = err.Error()
 		} else {
-			log.Printf("backup written: %s", path)
-			if cfg.Keep > 0 {
-				if _, err := store.PruneBackups(cfg.Dir, cfg.Keep); err != nil {
-					log.Printf("backup prune failed: %v", err)
-				}
-			}
+			status.Error = ""
 		}
-		s.mu.Lock()
 		s.lastBackup = status
 		s.mu.Unlock()
+		if err != nil {
+			log.Printf("backup failed: %v", err)
+			return
+		}
+		log.Printf("backup written: %s", path)
+		if cfg.Keep > 0 {
+			if _, err := store.PruneBackups(cfg.Dir, cfg.Keep); err != nil {
+				log.Printf("backup prune failed: %v", err)
+			}
+		}
 	}
 	run()
 	ticker := time.NewTicker(cfg.Every)

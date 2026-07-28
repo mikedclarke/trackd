@@ -2,13 +2,17 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/mikedclarke/trackd/internal/store"
 )
@@ -268,4 +272,55 @@ func TestIssueProjectAssignment(t *testing.T) {
 		t.Errorf("project not cleared: %+v", cleared)
 	}
 	e.expect("POST", "/api/v1/issues", map[string]any{"title": "bad", "project": "missing"}, http.StatusNotFound, nil)
+}
+
+// Regression: a backup wedged on a blocked directory (macOS TCC, dead mount)
+// used to hold the store's single connection and freeze every request until
+// the process was killed. The API must keep answering while a backup hangs.
+func TestAPIRespondsWhileBackupWedged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mkfifo unavailable on windows")
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	token, err := st.CreateToken("pm", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st, "test")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	backupDir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(backupDir, ".trackd-probe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.RunBackups(ctx, BackupConfig{Dir: backupDir, Every: time.Hour, Timeout: time.Hour})
+	time.Sleep(100 * time.Millisecond) // let the first run enter the wedge
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz while backup wedged: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz = %d while backup wedged, want 200", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/issues", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("issue list while backup wedged: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("issue list = %d while backup wedged, want 200", resp.StatusCode)
+	}
 }
