@@ -63,12 +63,19 @@ Open the same URL in a browser for the read-only board (sign in with a token).
 ## Concepts
 
 - **Issues** have a stable key (`TSK-1`), a status, a 0–4 priority (1 = urgent,
-  4 = low), labels, an optional project and parent, relations (`blocks`,
-  `relates`, `duplicate`), comments, and a full activity log.
+  4 = low), labels, an optional project, parent, assignee, and milestone,
+  relations (`blocks`, `relates`, `duplicate`), comments, and a full activity
+  log.
+- **Assignees** are free-form names — a person or an agent. Filter by them
+  everywhere (`trackd issue list --assignee pm`); routing work between humans
+  and agents is the point.
+- **Milestones** belong to a project and carry an optional target date. Issues
+  reference one by name within their project; moving an issue to another
+  project clears a milestone that no longer applies.
 - **Statuses** are workflow states with a type: `triage`, `backlog`, `unstarted`,
   `started`, `completed`, `canceled`. The defaults mirror a common agent workflow
-  (Triage → Backlog → Todo → In Progress → In Review → Done) and the names are
-  yours to edit.
+  (Triage → Backlog → Todo → In Progress → In Review → Done); importing from
+  Linear carries any extra statuses across.
 - **Projects** group issues and carry their own labels and status.
 - **Tokens are identities.** Mint one per agent (`trackd token add pm`). Writes
   are attributed to the token's name unless the request passes an explicit
@@ -80,9 +87,11 @@ Open the same URL in a browser for the read-only board (sign in with a token).
 
 `GET/POST /api/v1/issues`, `GET/PATCH /api/v1/issues/{key}`, comments, relations
 and per-issue events under the issue path, `GET/POST /api/v1/projects`,
-`GET/PATCH /api/v1/projects/{slug}`, `GET/POST /api/v1/labels`,
-`GET /api/v1/statuses`. List filters: `status`, `status_type`, `project`,
-`label`, `parent`, `q`, `updated_since`, `archived`, `limit`, `offset`.
+`GET/PATCH /api/v1/projects/{slug}`, `GET/POST /api/v1/milestones`,
+`GET/PATCH /api/v1/milestones/{id}`, `GET/POST /api/v1/labels`,
+`GET /api/v1/statuses`. Issue list filters: `status`, `status_type`, `project`,
+`label`, `parent`, `assignee`, `milestone`, `q`, `updated_since`, `archived`,
+`limit`, `offset`.
 PATCH bodies change only the fields they include; an explicit empty string
 clears a field. There are no DELETE endpoints by design.
 
@@ -92,7 +101,8 @@ the last verified backup.
 ### CLI
 
 `issue list|show|create|update|comment|relate|events`, `project
-list|show|create|update`, `label list|add`, `statuses`, `health`. Connection via
+list|show|create|update`, `milestone list|create|update`, `label list|add`,
+`statuses`, `health`. Connection via
 `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`. Every command takes `--json`
 for machine-readable output; `--description -` and `--body -` read stdin. Server
 maintenance commands (`serve`, `token`, `backup`, `restore`, `export`, `import`)
@@ -102,8 +112,8 @@ operate on the database file directly.
 
 Streamable HTTP at `/mcp`, same bearer auth. Tools: `list_issues`, `get_issue`
 (returns the issue with comments and relations), `save_issue` (create or update),
-`add_comment`, `list_projects`, `save_project`, `list_labels`. For Claude Code,
-add to `.mcp.json`:
+`add_comment`, `list_projects`, `save_project`, `list_milestones`,
+`save_milestone`, `list_labels`. For Claude Code, add to `.mcp.json`:
 
 ```json
 {
@@ -120,21 +130,24 @@ add to `.mcp.json`:
 ### Web UI
 
 Server-rendered, zero JavaScript, embedded in the binary. A board grouped by
-status with project/label filters, and an issue page with description, comments,
-relations, and the audit trail. Sign in once with any API token (30-day cookie).
+status with project/label/assignee filters, and an issue page with description,
+comments, relations, and the audit trail. Sign in once with any API token (30-day cookie).
 Read-only: agents do the writing.
 
 ## Data safety
 
-- `trackd serve --backup-dir <dir> [--backup-every 24h] [--backup-keep 14]`
-  snapshots on startup and on the interval. Every snapshot is `VACUUM INTO` plus
-  `PRAGMA integrity_check` — a backup that doesn't verify is deleted and
-  reported, never silently kept.
+- `trackd serve --backup-dir <dir> [--backup-every 24h] [--backup-keep 14]
+  [--backup-timeout 10m]` snapshots on startup and on the interval. Every
+  snapshot is `VACUUM INTO` plus `PRAGMA integrity_check` — a backup that
+  doesn't verify is deleted and reported, never silently kept. Backups run on
+  their own database connection and are bounded by `--backup-timeout`, so a
+  slow or hung backup destination can never block the API; failures show up in
+  `/healthz` alongside the last good snapshot.
 - `trackd backup` / `trackd restore <snapshot>` for manual operation. Restore
   refuses to overwrite an existing database.
 - `trackd export > dump.jsonl` writes the complete database as human-readable
   JSONL; `trackd import trackd dump.jsonl` restores it into a fresh file. The
-  round-trip is byte-identical and enforced in CI. This is the no-lock-in
+  round-trip is byte-identical and enforced by tests. This is the no-lock-in
   guarantee.
 - Schema migrations snapshot the database automatically before applying.
 - The audit log (`events`) records every mutation with actor and before/after
@@ -151,11 +164,11 @@ trackd import --db trackd.db linear export.csv
 ```
 
 Imports issues (original keys preserved, key sequence continues), statuses,
-text priorities, projects, labels, parent/child, blocked-by / related /
-duplicate relations, and timestamps. Cycles, milestones, and initiatives are
-ignored. Unknown statuses are created. Dangling references are skipped and
-reported, never fatal. Note: Linear's CSV export does not include comments, so
-comments cannot be migrated this way.
+text priorities, projects, assignees, milestones, labels, parent/child,
+blocked-by / related / duplicate relations, and timestamps. Cycles and
+initiatives are ignored. Unknown statuses are created. Dangling references are
+skipped and reported, never fatal. Note: Linear's CSV export does not include
+comments, so comments cannot be migrated this way.
 
 ## Running as a service
 
@@ -176,7 +189,11 @@ WantedBy=multi-user.target
 launchd (macOS): a `LaunchAgent` plist with
 `ProgramArguments = [trackd, serve, --db, ..., --backup-dir, ...]` and
 `KeepAlive = true`. Point `--backup-dir` at a directory that is itself synced or
-copied off the machine.
+copied off the machine — but note that macOS privacy protection (TCC) blocks
+launchd-spawned processes from privacy-protected folders such as `~/Documents`
+unless you grant the binary access in System Settings → Privacy & Security.
+trackd detects a blocked backup directory and reports it in `/healthz` instead
+of hanging.
 
 ## Development
 
