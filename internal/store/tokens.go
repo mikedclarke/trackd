@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -29,10 +30,21 @@ func (s *Store) CreateToken(name, role string) (string, error) {
 		return "", err
 	}
 	plaintext := "td_" + hex.EncodeToString(raw)
-	_, err := s.db.Exec(
-		"INSERT INTO tokens (name, hash, role, created_at) VALUES (?, ?, ?, ?)",
-		name, hashToken(plaintext), role, now(),
-	)
+	err := s.tx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			"INSERT INTO tokens (name, hash, role, created_at) VALUES (?, ?, ?, ?)",
+			name, hashToken(plaintext), role, now(),
+		)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		// The plaintext never reaches the audit trail.
+		return recordEvent(tx, "token", id, name, "token.created", nil, map[string]string{"name": name, "role": role})
+	})
 	if err != nil {
 		return "", fmt.Errorf("create token %q: %w", name, err)
 	}
@@ -58,10 +70,12 @@ func (s *Store) VerifyToken(plaintext string) (*Token, error) {
 		return nil, errors.New("invalid token")
 	}
 	// last_used_at is a coarse signal; refreshing at most once a minute avoids
-	// a synchronous write on every authenticated request.
+	// a synchronous write on every authenticated request. A failed refresh
+	// (a busy database, a read-only handle) must never cost a valid caller
+	// their request.
 	if stale(t.LastUsedAt, time.Minute) {
 		if _, err := s.db.Exec("UPDATE tokens SET last_used_at = ? WHERE id = ?", now(), t.ID); err != nil {
-			return nil, err
+			log.Printf("trackd: token %s last_used_at not refreshed: %v", t.Name, err)
 		}
 	}
 	return &t, nil
@@ -76,14 +90,21 @@ func stale(ts string, d time.Duration) bool {
 }
 
 func (s *Store) RevokeToken(name string) error {
-	res, err := s.db.Exec("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL", now(), name)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("token %q: %w", name, ErrNotFound)
-	}
-	return nil
+	return s.tx(func(tx *sql.Tx) error {
+		var id int64
+		err := tx.QueryRow("SELECT id FROM tokens WHERE name = ? AND revoked_at IS NULL", name).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("token %q: %w", name, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		ts := now()
+		if _, err := tx.Exec("UPDATE tokens SET revoked_at = ? WHERE id = ?", ts, id); err != nil {
+			return err
+		}
+		return recordEvent(tx, "token", id, name, "token.revoked", map[string]string{"name": name}, nil)
+	})
 }
 
 func (s *Store) ListTokens() ([]Token, error) {

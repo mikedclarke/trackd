@@ -1,7 +1,9 @@
 package server
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"html/template"
 	"log"
@@ -36,20 +38,81 @@ var (
 	loginTemplate = parseUITemplate("login.html")
 )
 
-const uiCookie = "trackd_token"
+const uiCookie = "trackd_session"
 
-// uiAuth gates the HTML pages on the same tokens as the API, carried in an
-// HttpOnly cookie set by the login form.
+// newSessionID mints the opaque value the browser holds. The API token never
+// travels in a cookie: a stolen cookie buys a session on a server that can
+// revoke it, not a credential that works everywhere.
+func newSessionID() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// sessions live in memory only, so a restart signs everyone out. That is the
+// intended lifetime for a read-only board behind a private network.
+func (s *Server) startSession(tokenName string) (string, error) {
+	id, err := newSessionID()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.sessions[id] = tokenName
+	s.mu.Unlock()
+	return id, nil
+}
+
+func (s *Server) session(id string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name, ok := s.sessions[id]
+	return name, ok
+}
+
+func (s *Server) endSession(id string) {
+	s.mu.Lock()
+	delete(s.sessions, id)
+	s.mu.Unlock()
+}
+
+// secureCookie reports whether the browser reached us over TLS, directly or
+// through the reverse proxy that terminates it.
+func secureCookie(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, id string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name: uiCookie, Value: id, Path: "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   secureCookie(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// uiAuth gates the HTML pages on the same tokens as the API, held indirectly
+// through a session cookie the login form sets.
 func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cookie, err := r.Cookie(uiCookie); err == nil {
-			if _, err := s.store.VerifyToken(cookie.Value); err == nil {
+			if name, ok := s.session(cookie.Value); ok {
+				if info, ok := r.Context().Value(requestKey).(*requestInfo); ok {
+					info.actor = name
+				}
 				next(w, r)
 				return
 			}
 		}
+		// A bearer token still works directly, which is how a script or a
+		// health probe reads a page without holding a session.
 		if header, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-			if _, err := s.store.VerifyToken(header); err == nil {
+			if token, err := s.store.VerifyToken(header); err == nil {
+				if info, ok := r.Context().Value(requestKey).(*requestInfo); ok {
+					info.actor = token.Name
+				}
 				next(w, r)
 				return
 			}
@@ -63,26 +126,27 @@ func (s *Server) uiLoginForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiLoginSubmit(w http.ResponseWriter, r *http.Request) {
-	token := r.PostFormValue("token")
-	if _, err := s.store.VerifyToken(token); err != nil {
+	token, err := s.store.VerifyToken(r.PostFormValue("token"))
+	if err != nil {
 		time.Sleep(500 * time.Millisecond) // blunt the token form as a guessing surface
 		w.WriteHeader(http.StatusUnauthorized)
 		s.render(w, loginTemplate, map[string]any{"Title": "sign in", "Error": "That token was not accepted. Check it and try again."})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: uiCookie, Value: token, Path: "/",
-		MaxAge:   30 * 24 * 60 * 60,
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
+	id, err := s.startSession(token.Name)
+	if err != nil {
+		http.Error(w, "could not start a session", http.StatusInternalServerError)
+		return
+	}
+	s.setSessionCookie(w, r, id, 30*24*60*60)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name: uiCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
+	if cookie, err := r.Cookie(uiCookie); err == nil {
+		s.endSession(cookie.Value)
+	}
+	s.setSessionCookie(w, r, "", -1)
 	http.Redirect(w, r, "/ui/login", http.StatusSeeOther)
 }
 
@@ -109,7 +173,11 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	label := r.URL.Query().Get("label")
 	assignee := r.URL.Query().Get("assignee")
-	issues, err := s.store.ListIssues(store.IssueFilter{Project: project, Label: label, Assignee: assignee, Limit: 5000})
+	filter := store.IssueFilter{Project: project, Assignee: assignee, Limit: maxIssueLimit}
+	if label != "" {
+		filter.Labels = []string{label}
+	}
+	issues, err := s.store.ListIssues(filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -202,9 +270,19 @@ func (s *Server) uiIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The project's own dates belong next to the issue's, so a reader can see
+	// whether an issue is late against its project without leaving the page.
+	var project *store.Project
+	if issue.Project != "" {
+		if project, err = s.store.GetProject(issue.Project); err != nil && !errors.Is(err, store.ErrNotFound) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	s.render(w, issueTemplate, map[string]any{
 		"Title":     issue.Key,
 		"Issue":     issue,
+		"Project":   project,
 		"Comments":  comments,
 		"Relations": relations,
 		"Events":    events,

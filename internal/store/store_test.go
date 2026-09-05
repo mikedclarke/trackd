@@ -19,6 +19,26 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
+// mustLabel creates labels up front: issue and project writes reject names
+// that do not already exist.
+func mustLabel(t *testing.T, s *Store, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, err := s.EnsureLabel(name, ""); err != nil {
+			t.Fatalf("label %s: %v", name, err)
+		}
+	}
+}
+
+func mustCreateIssue(t *testing.T, s *Store, in IssueInput, actor string) *Issue {
+	t.Helper()
+	issue, _, err := s.CreateIssue(in, actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issue
+}
+
 func TestOpenSeedsDefaults(t *testing.T) {
 	s := openTestStore(t)
 	statuses, err := s.ListStatuses()
@@ -36,14 +56,18 @@ func TestOpenSeedsDefaults(t *testing.T) {
 
 func TestIssueLifecycle(t *testing.T) {
 	s := openTestStore(t)
+	mustLabel(t, s, "agent-ready", "b")
 
-	issue, err := s.CreateIssue(IssueInput{
+	issue, created, err := s.CreateIssue(IssueInput{
 		Title:       "First issue",
 		Description: "Body with unicode — ✓ and\nnewlines",
 		Labels:      []string{"agent-ready", "b", "agent-ready"},
 	}, "pm")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !created {
+		t.Error("created = false on a first create")
 	}
 	if issue.Key != "TSK-1" {
 		t.Errorf("key = %q, want TSK-1", issue.Key)
@@ -55,7 +79,7 @@ func TestIssueLifecycle(t *testing.T) {
 		t.Errorf("labels = %v, want deduped 2", issue.Labels)
 	}
 
-	second, err := s.CreateIssue(IssueInput{Title: "Second"}, "")
+	second, _, err := s.CreateIssue(IssueInput{Title: "Second"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,11 +143,11 @@ func TestIssueLifecycle(t *testing.T) {
 	if _, err := s.GetIssue("TSK-999"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing issue error = %v, want ErrNotFound", err)
 	}
-	if _, err := s.CreateIssue(IssueInput{Title: "bad", Priority: 9}, ""); err == nil {
+	if _, _, err := s.CreateIssue(IssueInput{Title: "bad", Priority: 9}, ""); err == nil {
 		t.Error("priority 9 accepted")
 	}
-	if _, err := s.CreateIssue(IssueInput{Title: "bad", Status: "Nope"}, ""); err == nil {
-		t.Error("unknown status accepted")
+	if _, _, err := s.CreateIssue(IssueInput{Title: "bad", Status: "Nope"}, ""); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("unknown status = %v, want ErrInvalidRef", err)
 	}
 }
 
@@ -132,13 +156,10 @@ func TestListIssueFilters(t *testing.T) {
 	if _, err := s.CreateProject(ProjectInput{Name: "Site Rebuild"}, ""); err != nil {
 		t.Fatal(err)
 	}
+	mustLabel(t, s, "agent-ready")
 	mk := func(title, status, project string, labels ...string) *Issue {
 		t.Helper()
-		issue, err := s.CreateIssue(IssueInput{Title: title, Status: status, Project: project, Labels: labels}, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return issue
+		return mustCreateIssue(t, s, IssueInput{Title: title, Status: status, Project: project, Labels: labels}, "")
 	}
 	mk("Fix header", "Todo", "site-rebuild", "agent-ready")
 	mk("Write copy", "Todo", "site-rebuild")
@@ -150,11 +171,14 @@ func TestListIssueFilters(t *testing.T) {
 		want int
 	}{
 		{"all", IssueFilter{}, 3},
-		{"status", IssueFilter{Status: "Todo"}, 2},
-		{"status type", IssueFilter{StatusType: "started"}, 1},
+		{"status", IssueFilter{Statuses: []string{"Todo"}}, 2},
+		{"status lowercase", IssueFilter{Statuses: []string{"todo"}}, 2},
+		{"two statuses", IssueFilter{Statuses: []string{"Todo", "In Progress"}}, 3},
+		{"status type", IssueFilter{StatusTypes: []string{"started"}}, 1},
 		{"project", IssueFilter{Project: "site-rebuild"}, 2},
-		{"label", IssueFilter{Label: "agent-ready"}, 2},
-		{"label and status", IssueFilter{Label: "agent-ready", Status: "Todo"}, 1},
+		{"label", IssueFilter{Labels: []string{"agent-ready"}}, 2},
+		{"label and status", IssueFilter{Labels: []string{"agent-ready"}, Statuses: []string{"Todo"}}, 1},
+		{"exclude label", IssueFilter{ExcludeLabels: []string{"agent-ready"}}, 1},
 		{"query", IssueFilter{Query: "backlinks"}, 1},
 		{"query key", IssueFilter{Query: "TSK-2"}, 1},
 		{"no match", IssueFilter{Query: "zzz"}, 0},
@@ -186,10 +210,10 @@ func TestListIssueFilters(t *testing.T) {
 
 func TestCommentsAndRelations(t *testing.T) {
 	s := openTestStore(t)
-	a, _ := s.CreateIssue(IssueInput{Title: "A"}, "")
-	b, _ := s.CreateIssue(IssueInput{Title: "B"}, "")
+	a := mustCreateIssue(t, s, IssueInput{Title: "A"}, "")
+	b := mustCreateIssue(t, s, IssueInput{Title: "B"}, "")
 
-	c, err := s.AddComment(a.Key, "Done, see output/", "engineer")
+	c, _, err := s.AddComment(a.Key, CommentInput{Body: "Done, see output/"}, "engineer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +271,9 @@ func TestProjects(t *testing.T) {
 		t.Fatalf("update = %+v, %v", updated, err)
 	}
 
-	withLabels, err := s.SetProjectLabels(p.Slug, []string{"client-x"}, "pm")
+	mustLabel(t, s, "client-x")
+	labels := []string{"client-x"}
+	withLabels, err := s.UpdateProject(p.Slug, ProjectPatch{Labels: &labels}, "pm")
 	if err != nil || len(withLabels.Labels) != 1 {
 		t.Fatalf("labels = %+v, %v", withLabels, err)
 	}
@@ -301,10 +327,7 @@ func TestCustomPrefix(t *testing.T) {
 	if err := s.SetSetting("issue_prefix", "GDL"); err != nil {
 		t.Fatal(err)
 	}
-	issue, err := s.CreateIssue(IssueInput{Title: "x"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	issue := mustCreateIssue(t, s, IssueInput{Title: "x"}, "")
 	if issue.Key != "GDL-1" {
 		t.Errorf("key = %q, want GDL-1", issue.Key)
 	}
@@ -317,7 +340,7 @@ func TestMigrationSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateIssue(IssueInput{Title: "survives"}, ""); err != nil {
+	if _, _, err := s.CreateIssue(IssueInput{Title: "survives"}, ""); err != nil {
 		t.Fatal(err)
 	}
 

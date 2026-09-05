@@ -1,7 +1,7 @@
 package store
 
 import (
-	"strings"
+	"errors"
 	"testing"
 )
 
@@ -71,10 +71,7 @@ func TestMilestoneCRUD(t *testing.T) {
 func TestIssueAssigneeAndMilestone(t *testing.T) {
 	s := milestoneFixture(t)
 
-	issue, err := s.CreateIssue(IssueInput{Title: "Ship it", Project: "rebuild", Assignee: "engineer", Milestone: "Launch"}, "pm")
-	if err != nil {
-		t.Fatal(err)
-	}
+	issue := mustCreateIssue(t, s, IssueInput{Title: "Ship it", Project: "rebuild", Assignee: "engineer", Milestone: "Launch"}, "pm")
 	if issue.Assignee != "engineer" || issue.Milestone != "Launch" {
 		t.Fatalf("issue = %+v", issue)
 	}
@@ -94,11 +91,11 @@ func TestIssueAssigneeAndMilestone(t *testing.T) {
 	}
 
 	// A milestone needs a project, and must exist in that project.
-	if _, err := s.CreateIssue(IssueInput{Title: "No project", Milestone: "Launch"}, "pm"); err == nil {
+	if _, _, err := s.CreateIssue(IssueInput{Title: "No project", Milestone: "Launch"}, "pm"); err == nil {
 		t.Error("milestone without project was accepted")
 	}
-	if _, err := s.CreateIssue(IssueInput{Title: "Wrong name", Project: "rebuild", Milestone: "Nope"}, "pm"); err == nil {
-		t.Error("unknown milestone was accepted")
+	if _, _, err := s.CreateIssue(IssueInput{Title: "Wrong name", Project: "rebuild", Milestone: "Nope"}, "pm"); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("unknown milestone = %v, want ErrInvalidRef", err)
 	}
 
 	// Clearing and re-setting via patch.
@@ -141,11 +138,8 @@ func TestIssueAssigneeAndMilestone(t *testing.T) {
 	if _, err := s.UpdateMilestone(milestones[0].ID, MilestonePatch{Archived: &archived}, "pm"); err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := s.CreateIssue(IssueInput{Title: "Late arrival", Project: "rebuild"}, "pm")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.UpdateIssue(fresh.Key, IssuePatch{Milestone: &launch}, "pm"); err == nil || !strings.Contains(err.Error(), "not found") {
+	fresh := mustCreateIssue(t, s, IssueInput{Title: "Late arrival", Project: "rebuild"}, "pm")
+	if _, err := s.UpdateIssue(fresh.Key, IssuePatch{Milestone: &launch}, "pm"); !errors.Is(err, ErrInvalidRef) {
 		t.Errorf("archived milestone was assignable: %v", err)
 	}
 }

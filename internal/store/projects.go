@@ -8,7 +8,15 @@ import (
 	"strings"
 )
 
-var projectStatuses = map[string]bool{"active": true, "paused": true, "completed": true, "canceled": true}
+// Linear's project state vocabulary, so an imported project keeps its state.
+var projectStatuses = map[string]bool{
+	"backlog":   true,
+	"planned":   true,
+	"started":   true,
+	"paused":    true,
+	"completed": true,
+	"canceled":  true,
+}
 
 func (s *Store) CreateProject(in ProjectInput, actor string) (*Project, error) {
 	if strings.TrimSpace(in.Name) == "" {
@@ -23,23 +31,52 @@ func (s *Store) CreateProject(in ProjectInput, actor string) (*Project, error) {
 	}
 	status := in.Status
 	if status == "" {
-		status = "active"
+		status = "backlog"
 	}
+	status = strings.ToLower(status)
 	if !projectStatuses[status] {
 		return nil, fmt.Errorf("unknown project status %q", status)
 	}
+	if err := validDate(in.StartDate); err != nil {
+		return nil, fmt.Errorf("start date: %w", err)
+	}
+	if err := validDate(in.TargetDate); err != nil {
+		return nil, fmt.Errorf("target date: %w", err)
+	}
 	var out *Project
 	err := s.tx(func(tx *sql.Tx) error {
+		if err := projectNameFree(tx, in.Name, 0); err != nil {
+			return err
+		}
+		var taken int64
+		err := tx.QueryRow("SELECT id FROM projects WHERE slug = ? COLLATE NOCASE", slug).Scan(&taken)
+		if err == nil {
+			return fmt.Errorf("project slug %q is already taken: %w", slug, ErrConflict)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		labels, err := normalizeLabels(tx, nil, &in.Labels, nil, nil)
+		if err != nil {
+			return err
+		}
 		ts := now()
+		var completedAt any
+		if status == "completed" {
+			completedAt = ts
+		}
 		res, err := tx.Exec(
-			"INSERT INTO projects (name, slug, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-			in.Name, slug, in.Description, status, ts, ts,
+			"INSERT INTO projects (name, slug, description, status, start_date, target_date, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			in.Name, slug, in.Description, status, nullable(in.StartDate), nullable(in.TargetDate), ts, ts, completedAt,
 		)
 		if err != nil {
 			return err
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
+			return err
+		}
+		if err := applyProjectLabels(tx, id, labels); err != nil {
 			return err
 		}
 		out, err = loadProject(tx, slug)
@@ -62,8 +99,21 @@ func (s *Store) GetProject(slug string) (*Project, error) {
 }
 
 func (s *Store) UpdateProject(slug string, p ProjectPatch, actor string) (*Project, error) {
-	if p.Status != nil && !projectStatuses[*p.Status] {
+	if p.Status != nil && !projectStatuses[strings.ToLower(*p.Status)] {
 		return nil, fmt.Errorf("unknown project status %q", *p.Status)
+	}
+	if p.Labels != nil && (len(p.AddLabels) > 0 || len(p.RemoveLabels) > 0) {
+		return nil, errors.New("labels cannot be combined with add_labels or remove_labels")
+	}
+	for _, d := range []struct {
+		field string
+		value *string
+	}{{"start date", p.StartDate}, {"target date", p.TargetDate}} {
+		if d.value != nil {
+			if err := validDate(*d.value); err != nil {
+				return nil, fmt.Errorf("%s: %w", d.field, err)
+			}
+		}
 	}
 	var out *Project
 	err := s.tx(func(tx *sql.Tx) error {
@@ -77,13 +127,29 @@ func (s *Store) UpdateProject(slug string, p ProjectPatch, actor string) (*Proje
 			if strings.TrimSpace(*p.Name) == "" {
 				return errors.New("project name is required")
 			}
+			if err := projectNameFree(tx, *p.Name, before.ID); err != nil {
+				return err
+			}
 			sets, args = append(sets, "name = ?"), append(args, *p.Name)
 		}
 		if p.Description != nil {
 			sets, args = append(sets, "description = ?"), append(args, *p.Description)
 		}
 		if p.Status != nil {
-			sets, args = append(sets, "status = ?"), append(args, *p.Status)
+			status := strings.ToLower(*p.Status)
+			sets, args = append(sets, "status = ?"), append(args, status)
+			switch {
+			case status == "completed" && before.CompletedAt == "":
+				sets, args = append(sets, "completed_at = ?"), append(args, now())
+			case status != "completed" && before.CompletedAt != "":
+				sets = append(sets, "completed_at = NULL")
+			}
+		}
+		if p.StartDate != nil {
+			sets, args = append(sets, "start_date = ?"), append(args, nullable(*p.StartDate))
+		}
+		if p.TargetDate != nil {
+			sets, args = append(sets, "target_date = ?"), append(args, nullable(*p.TargetDate))
 		}
 		if p.Archived != nil {
 			if *p.Archived {
@@ -92,6 +158,15 @@ func (s *Store) UpdateProject(slug string, p ProjectPatch, actor string) (*Proje
 				}
 			} else {
 				sets = append(sets, "archived_at = NULL")
+			}
+		}
+		if p.Labels != nil || len(p.AddLabels) > 0 || len(p.RemoveLabels) > 0 {
+			labels, err := normalizeLabels(tx, before.Labels, p.Labels, p.AddLabels, p.RemoveLabels)
+			if err != nil {
+				return err
+			}
+			if err := applyProjectLabels(tx, before.ID, labels); err != nil {
+				return err
 			}
 		}
 		args = append(args, before.ID)
@@ -107,26 +182,18 @@ func (s *Store) UpdateProject(slug string, p ProjectPatch, actor string) (*Proje
 	return out, err
 }
 
-func (s *Store) SetProjectLabels(slug string, names []string, actor string) (*Project, error) {
-	var out *Project
-	err := s.tx(func(tx *sql.Tx) error {
-		before, err := loadProject(tx, slug)
-		if err != nil {
-			return err
-		}
-		if err := setProjectLabels(tx, before.ID, names); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("UPDATE projects SET updated_at = ? WHERE id = ?", now(), before.ID); err != nil {
-			return err
-		}
-		out, err = loadProject(tx, slug)
-		if err != nil {
-			return err
-		}
-		return recordEvent(tx, "project", before.ID, actor, "project.updated", before, out)
-	})
-	return out, err
+// projectNameFree rejects a name another project already holds, compared
+// without case so "Site Rebuild" and "site rebuild" cannot both exist.
+func projectNameFree(tx *sql.Tx, name string, exceptID int64) error {
+	var id int64
+	err := tx.QueryRow("SELECT id FROM projects WHERE name = ? COLLATE NOCASE AND id != ?", name, exceptID).Scan(&id)
+	if err == nil {
+		return fmt.Errorf("project %q already exists: %w", name, ErrConflict)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 func (s *Store) ListProjects(includeArchived bool) ([]Project, error) {
@@ -136,20 +203,17 @@ func (s *Store) ListProjects(includeArchived bool) ([]Project, error) {
 	}
 	var out []Project
 	err := s.tx(func(tx *sql.Tx) error {
-		rows, err := tx.Query(
-			"SELECT id, name, slug, description, status, created_at, updated_at, COALESCE(archived_at, '') FROM projects " +
-				where + " ORDER BY name",
-		)
+		rows, err := tx.Query(projectSelect + " " + where + " ORDER BY name")
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var p Project
-			if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.Description, &p.Status, &p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt); err != nil {
+			p, err := scanProject(rows)
+			if err != nil {
 				return err
 			}
-			out = append(out, p)
+			out = append(out, *p)
 		}
 		if err := rows.Err(); err != nil {
 			return err
@@ -164,12 +228,27 @@ func (s *Store) ListProjects(includeArchived bool) ([]Project, error) {
 	return out, err
 }
 
-func loadProject(tx *sql.Tx, slug string) (*Project, error) {
+const projectSelect = `
+	SELECT id, name, slug, description, status,
+	       COALESCE(start_date, ''), COALESCE(target_date, ''),
+	       created_at, updated_at, COALESCE(completed_at, ''), COALESCE(archived_at, '')
+	FROM projects`
+
+func scanProject(r rowScanner) (*Project, error) {
 	var p Project
-	err := tx.QueryRow(
-		"SELECT id, name, slug, description, status, created_at, updated_at, COALESCE(archived_at, '') FROM projects WHERE slug = ?",
-		slug,
-	).Scan(&p.ID, &p.Name, &p.Slug, &p.Description, &p.Status, &p.CreatedAt, &p.UpdatedAt, &p.ArchivedAt)
+	err := r.Scan(
+		&p.ID, &p.Name, &p.Slug, &p.Description, &p.Status,
+		&p.StartDate, &p.TargetDate,
+		&p.CreatedAt, &p.UpdatedAt, &p.CompletedAt, &p.ArchivedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func loadProject(tx *sql.Tx, slug string) (*Project, error) {
+	p, err := scanProject(tx.QueryRow(projectSelect+" WHERE slug = ? COLLATE NOCASE", slug))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("project %s: %w", slug, ErrNotFound)
 	}
@@ -179,7 +258,7 @@ func loadProject(tx *sql.Tx, slug string) (*Project, error) {
 	if p.Labels, err = projectLabels(tx, p.ID); err != nil {
 		return nil, err
 	}
-	return &p, nil
+	return p, nil
 }
 
 var slugStrip = regexp.MustCompile(`[^a-z0-9]+`)

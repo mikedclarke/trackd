@@ -21,10 +21,20 @@ import (
 var version = "dev"
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "trackd:", err)
-		os.Exit(1)
+	err := run(os.Args[1:])
+	if err == nil {
+		return
 	}
+	// --json callers parse stdout, so the machine-readable error goes there and
+	// the human line to stderr. The flag package has already printed its own
+	// usage for a help request, so that one is not repeated.
+	if wantsJSON(os.Args[1:]) {
+		_ = printJSON(errorObject(err))
+	}
+	if !errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(os.Stderr, "trackd:", err)
+	}
+	os.Exit(exitCode(err))
 }
 
 func run(args []string) error {
@@ -41,6 +51,10 @@ func run(args []string) error {
 		return cmdServe(rest)
 	case "issue":
 		return cmdIssue(rest)
+	case "comment":
+		return cmdComment(rest)
+	case "events":
+		return cmdEvents(rest)
 	case "project":
 		return cmdProject(rest)
 	case "label":
@@ -66,7 +80,7 @@ func run(args []string) error {
 		return nil
 	default:
 		usage()
-		return fmt.Errorf("unknown command %q", cmd)
+		return usagef("unknown command %q", cmd)
 	}
 }
 
@@ -75,6 +89,36 @@ func defaultDB() string {
 		return v
 	}
 	return "trackd.db"
+}
+
+// openError turns the two open failures an operator can act on into plain
+// advice instead of a wrapped sentinel.
+func openError(path string, err error) error {
+	switch {
+	case errors.Is(err, store.ErrIntegrity):
+		return fmt.Errorf("%s failed its integrity check and was not opened; restore the newest verified snapshot into a new file with: trackd restore --db <new path> <snapshot>", path)
+	case errors.Is(err, store.ErrSchemaNewer):
+		return fmt.Errorf("%s was written by a newer trackd; upgrade this binary before opening the file", path)
+	}
+	return err
+}
+
+// openLocked opens the database read-write and takes the exclusive lock, so a
+// command that writes to the file can never run behind a live server's back.
+func openLocked(path string) (*store.Store, func(), error) {
+	st, err := store.Open(path)
+	if err != nil {
+		return nil, nil, openError(path, err)
+	}
+	release, err := st.LockExclusive()
+	if err != nil {
+		st.Close()
+		if errors.Is(err, store.ErrLocked) {
+			return nil, nil, fmt.Errorf("another trackd is running on %s", path)
+		}
+		return nil, nil, err
+	}
+	return st, release, nil
 }
 
 func cmdServe(args []string) error {
@@ -88,11 +132,21 @@ func cmdServe(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	st, err := store.Open(*db)
+	// The pre-migration snapshot belongs with the other backups when there is
+	// a backup directory: it is the copy you want if a migration goes wrong.
+	st, err := store.OpenWith(*db, store.Options{SnapshotDir: *backupDir})
 	if err != nil {
-		return err
+		return openError(*db, err)
 	}
 	defer st.Close()
+	release, err := st.LockExclusive()
+	if err != nil {
+		if errors.Is(err, store.ErrLocked) {
+			return fmt.Errorf("another trackd is running on %s", *db)
+		}
+		return err
+	}
+	defer release()
 
 	tokens, err := st.ListTokens()
 	if err != nil {
@@ -103,7 +157,9 @@ func cmdServe(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created initial admin token (store it now; it is never shown again):\n  %s\n", plaintext)
+		// stderr, so redirecting stdout to a log file does not put a live
+		// credential in it.
+		fmt.Fprintf(os.Stderr, "created initial admin token (store it now; it is never shown again):\n  %s\n", plaintext)
 	}
 
 	srv := server.New(st, version)
@@ -111,13 +167,19 @@ func cmdServe(args []string) error {
 	defer stop()
 	go srv.RunBackups(ctx, server.BackupConfig{Dir: *backupDir, Every: *backupEvery, Keep: *backupKeep, Timeout: *backupTimeout})
 
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      server.WriteTimeout,
+		IdleTimeout:       server.IdleTimeout,
+	}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
 		log.Print("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), server.ShutdownBudget)
 		defer cancel()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown: %v", err)
@@ -133,7 +195,7 @@ func cmdServe(args []string) error {
 
 func cmdToken(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: trackd token <add|list|revoke> [flags]")
+		return usagef("usage: trackd token <add|list|revoke> [flags]")
 	}
 	sub, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("token "+sub, flag.ContinueOnError)
@@ -142,16 +204,17 @@ func cmdToken(args []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	st, err := store.Open(*db)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
 	switch sub {
 	case "add":
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: trackd token add [--db <path>] [--role agent|admin] <name>")
+			return usagef("usage: trackd token add [--db <path>] [--role agent|admin] <name>")
 		}
+		st, release, err := openLocked(*db)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		defer release()
 		plaintext, err := st.CreateToken(fs.Arg(0), *role)
 		if err != nil {
 			return err
@@ -159,6 +222,12 @@ func cmdToken(args []string) error {
 		fmt.Println(plaintext)
 		return nil
 	case "list":
+		// Read-only: listing tokens while the server runs is safe and common.
+		st, err := store.OpenReadOnly(*db)
+		if err != nil {
+			return openError(*db, err)
+		}
+		defer st.Close()
 		tokens, err := st.ListTokens()
 		if err != nil {
 			return err
@@ -171,15 +240,21 @@ func cmdToken(args []string) error {
 		return w.Flush()
 	case "revoke":
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: trackd token revoke [--db <path>] <name>")
+			return usagef("usage: trackd token revoke [--db <path>] <name>")
 		}
+		st, release, err := openLocked(*db)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		defer release()
 		if err := st.RevokeToken(fs.Arg(0)); err != nil {
 			return err
 		}
 		fmt.Println("revoked", fs.Arg(0))
 		return nil
 	default:
-		return fmt.Errorf("unknown token subcommand %q", sub)
+		return usagef("unknown token subcommand %q", sub)
 	}
 }
 
@@ -191,9 +266,11 @@ func cmdBackup(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := store.Open(*db)
+	// Read-only: a snapshot of a database a server is serving is the normal
+	// case, and this way the command can never migrate or write to the file.
+	s, err := store.OpenReadOnly(*db)
 	if err != nil {
-		return err
+		return openError(*db, err)
 	}
 	defer s.Close()
 	snap, err := s.Backup(*to)
@@ -220,7 +297,23 @@ func cmdRestore(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: trackd restore [--db <path>] <snapshot.db>")
+		return usagef("usage: trackd restore [--db <path>] <snapshot.db>")
+	}
+	// A live server holds the lock on its own database file. Restore never
+	// overwrites an existing file, but check the lock first so the reason
+	// given is the real one.
+	if _, err := os.Stat(*db); err == nil {
+		st, openErr := store.OpenReadOnly(*db)
+		if openErr == nil {
+			release, lockErr := st.LockExclusive()
+			st.Close()
+			if lockErr != nil && errors.Is(lockErr, store.ErrLocked) {
+				return fmt.Errorf("another trackd is running on %s", *db)
+			}
+			if release != nil {
+				release()
+			}
+		}
 	}
 	if err := store.Restore(fs.Arg(0), *db); err != nil {
 		return err
@@ -236,9 +329,10 @@ func cmdExport(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := store.Open(*db)
+	// Read-only: exporting a database a server is serving is the normal case.
+	s, err := store.OpenReadOnly(*db)
 	if err != nil {
-		return err
+		return openError(*db, err)
 	}
 	defer s.Close()
 	if *out == "" {
@@ -265,7 +359,7 @@ func cmdImport(args []string) error {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: trackd import [--db <path>] <format> <file> (formats: trackd, linear)")
+		return usagef("usage: trackd import [--db <path>] <format> <file> (formats: trackd, linear)")
 	}
 	format, path := fs.Arg(0), fs.Arg(1)
 	f, err := os.Open(path)
@@ -273,11 +367,12 @@ func cmdImport(args []string) error {
 		return err
 	}
 	defer f.Close()
-	s, err := store.Open(*db)
+	s, release, err := openLocked(*db)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	defer release()
 	switch format {
 	case "trackd":
 		if err := s.ImportDump(f); err != nil {
@@ -308,12 +403,12 @@ func cmdImport(args []string) error {
 		fmt.Println("note: Linear CSV exports do not include comments; comments are not migrated")
 		return nil
 	default:
-		return fmt.Errorf("unknown import format %q (formats: trackd, linear)", format)
+		return usagef("unknown import format %q (formats: trackd, linear)", format)
 	}
 }
 
 func usage() {
-	fmt.Print(`trackd — self-hosted task tracking for AI agents
+	fmt.Print(`trackd, self-hosted task tracking for AI agents
 
 Usage:
   trackd <command> [flags]
@@ -327,7 +422,9 @@ Server commands (operate on the database file directly):
   import    load a dump into a new database            (--db) <format> <file>
 
 Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_TOKEN):
-  issue     list | show | create | update | comment | relate | events
+  issue     list | show | create | update | append | comment | relate | events
+  comment   edit
+  events    the global activity feed
   project   list | show | create | update
   milestone list | create | update
   label     list | add
@@ -337,7 +434,9 @@ Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_
   version   print the version
   help      show this help
 
-All client commands accept --json for machine-readable output.
+All client commands accept --json for machine-readable output, on failure too.
+Exit codes: 0 ok, 1 unexpected, 2 usage or validation, 3 not found, 4 auth,
+5 conflict, 6 server or network.
 The database path defaults to $TRACKD_DB, then ./trackd.db.
 `)
 }

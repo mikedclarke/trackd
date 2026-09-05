@@ -2,6 +2,7 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,11 +13,12 @@ import (
 // mirroring table columns exactly so that export -> import -> export is
 // byte-identical. Records are ordered deterministically.
 
-const dumpVersion = 1
+const dumpVersion = 2
 
 type dumpHeader struct {
 	Record  string `json:"record"`
 	Version int    `json:"version"`
+	Schema  int    `json:"schema,omitempty"`
 }
 
 type dumpSetting struct {
@@ -40,8 +42,11 @@ type dumpProject struct {
 	Slug        string  `json:"slug"`
 	Description string  `json:"description"`
 	Status      string  `json:"status"`
+	StartDate   *string `json:"start_date,omitempty"`
+	TargetDate  *string `json:"target_date,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
+	CompletedAt *string `json:"completed_at,omitempty"`
 	ArchivedAt  *string `json:"archived_at,omitempty"`
 }
 
@@ -65,24 +70,26 @@ type dumpMilestone struct {
 }
 
 type dumpIssue struct {
-	Record      string  `json:"record"`
-	ID          int64   `json:"id"`
-	Key         string  `json:"key"`
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	StatusID    int64   `json:"status_id"`
-	Priority    int     `json:"priority"`
-	ProjectID   *int64  `json:"project_id,omitempty"`
-	ParentID    *int64  `json:"parent_id,omitempty"`
-	Assignee    string  `json:"assignee,omitempty"`
-	MilestoneID *int64  `json:"milestone_id,omitempty"`
-	DueDate     *string `json:"due_date,omitempty"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
-	StartedAt   *string `json:"started_at,omitempty"`
-	CompletedAt *string `json:"completed_at,omitempty"`
-	CanceledAt  *string `json:"canceled_at,omitempty"`
-	ArchivedAt  *string `json:"archived_at,omitempty"`
+	Record         string  `json:"record"`
+	ID             int64   `json:"id"`
+	Key            string  `json:"key"`
+	Title          string  `json:"title"`
+	Description    string  `json:"description"`
+	StatusID       int64   `json:"status_id"`
+	Priority       int     `json:"priority"`
+	ProjectID      *int64  `json:"project_id,omitempty"`
+	ParentID       *int64  `json:"parent_id,omitempty"`
+	Assignee       string  `json:"assignee,omitempty"`
+	MilestoneID    *int64  `json:"milestone_id,omitempty"`
+	DueDate        *string `json:"due_date,omitempty"`
+	Version        int64   `json:"version"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	StartedAt      *string `json:"started_at,omitempty"`
+	CompletedAt    *string `json:"completed_at,omitempty"`
+	CanceledAt     *string `json:"canceled_at,omitempty"`
+	ArchivedAt     *string `json:"archived_at,omitempty"`
 }
 
 type dumpIssueLabel struct {
@@ -98,13 +105,15 @@ type dumpProjectLabel struct {
 }
 
 type dumpComment struct {
-	Record    string `json:"record"`
-	ID        int64  `json:"id"`
-	IssueID   int64  `json:"issue_id"`
-	Body      string `json:"body"`
-	Actor     string `json:"actor"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	Record         string  `json:"record"`
+	ID             int64   `json:"id"`
+	IssueID        int64   `json:"issue_id"`
+	Body           string  `json:"body"`
+	Actor          string  `json:"actor"`
+	ParentID       *int64  `json:"parent_id,omitempty"`
+	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 type dumpRelation struct {
@@ -151,7 +160,13 @@ func (s *Store) ExportDump(w io.Writer) error {
 			}
 			return bw.WriteByte('\n')
 		}
-		if err := write(dumpHeader{Record: "trackd", Version: dumpVersion}); err != nil {
+		// The schema version travels with the dump so an older binary can
+		// refuse a file it would silently mangle.
+		var schema int
+		if err := tx.QueryRow("PRAGMA user_version").Scan(&schema); err != nil {
+			return err
+		}
+		if err := write(dumpHeader{Record: "trackd", Version: dumpVersion, Schema: schema}); err != nil {
 			return err
 		}
 		if err := exportRows(tx, "SELECT key, value FROM settings ORDER BY key", func(scan rowScanner) (any, error) {
@@ -166,9 +181,9 @@ func (s *Store) ExportDump(w io.Writer) error {
 		}, write); err != nil {
 			return err
 		}
-		if err := exportRows(tx, "SELECT id, name, slug, description, status, created_at, updated_at, archived_at FROM projects ORDER BY id", func(scan rowScanner) (any, error) {
+		if err := exportRows(tx, "SELECT id, name, slug, description, status, start_date, target_date, created_at, updated_at, completed_at, archived_at FROM projects ORDER BY id", func(scan rowScanner) (any, error) {
 			r := dumpProject{Record: "project"}
-			return r, scan.Scan(&r.ID, &r.Name, &r.Slug, &r.Description, &r.Status, &r.CreatedAt, &r.UpdatedAt, &r.ArchivedAt)
+			return r, scan.Scan(&r.ID, &r.Name, &r.Slug, &r.Description, &r.Status, &r.StartDate, &r.TargetDate, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.ArchivedAt)
 		}, write); err != nil {
 			return err
 		}
@@ -184,9 +199,9 @@ func (s *Store) ExportDump(w io.Writer) error {
 		}, write); err != nil {
 			return err
 		}
-		if err := exportRows(tx, "SELECT id, key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at FROM issues ORDER BY id", func(scan rowScanner) (any, error) {
+		if err := exportRows(tx, "SELECT id, key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, version, idempotency_key, created_at, updated_at, started_at, completed_at, canceled_at, archived_at FROM issues ORDER BY id", func(scan rowScanner) (any, error) {
 			r := dumpIssue{Record: "issue"}
-			return r, scan.Scan(&r.ID, &r.Key, &r.Title, &r.Description, &r.StatusID, &r.Priority, &r.ProjectID, &r.ParentID, &r.Assignee, &r.MilestoneID, &r.DueDate, &r.CreatedAt, &r.UpdatedAt, &r.StartedAt, &r.CompletedAt, &r.CanceledAt, &r.ArchivedAt)
+			return r, scan.Scan(&r.ID, &r.Key, &r.Title, &r.Description, &r.StatusID, &r.Priority, &r.ProjectID, &r.ParentID, &r.Assignee, &r.MilestoneID, &r.DueDate, &r.Version, &r.IdempotencyKey, &r.CreatedAt, &r.UpdatedAt, &r.StartedAt, &r.CompletedAt, &r.CanceledAt, &r.ArchivedAt)
 		}, write); err != nil {
 			return err
 		}
@@ -202,9 +217,9 @@ func (s *Store) ExportDump(w io.Writer) error {
 		}, write); err != nil {
 			return err
 		}
-		if err := exportRows(tx, "SELECT id, issue_id, body, actor, created_at, updated_at FROM comments ORDER BY id", func(scan rowScanner) (any, error) {
+		if err := exportRows(tx, "SELECT id, issue_id, body, actor, parent_id, idempotency_key, created_at, updated_at FROM comments ORDER BY id", func(scan rowScanner) (any, error) {
 			r := dumpComment{Record: "comment"}
-			return r, scan.Scan(&r.ID, &r.IssueID, &r.Body, &r.Actor, &r.CreatedAt, &r.UpdatedAt)
+			return r, scan.Scan(&r.ID, &r.IssueID, &r.Body, &r.Actor, &r.ParentID, &r.IdempotencyKey, &r.CreatedAt, &r.UpdatedAt)
 		}, write); err != nil {
 			return err
 		}
@@ -277,8 +292,20 @@ func (s *Store) ImportDump(r io.Reader) error {
 	if err := json.Unmarshal(first, &header); err != nil || header.Record != "trackd" {
 		return fmt.Errorf("not a trackd dump (bad header)")
 	}
-	if header.Version != dumpVersion {
+	if header.Version != 1 && header.Version != dumpVersion {
 		return fmt.Errorf("unsupported dump version %d", header.Version)
+	}
+	// v1 dumps predate the header's schema field; they came from schema 2.
+	schema := header.Schema
+	if schema == 0 {
+		schema = 2
+	}
+	migs, err := loadMigrations()
+	if err != nil {
+		return err
+	}
+	if schema > len(migs) {
+		return fmt.Errorf("dump is at schema %d, this binary knows %d: %w", schema, len(migs), ErrSchemaNewer)
 	}
 	return s.tx(func(tx *sql.Tx) error {
 		// Issues may reference parents with higher IDs; check FKs at commit.
@@ -302,7 +329,7 @@ func (s *Store) ImportDump(r io.Reader) error {
 				return err
 			}
 			lineNo++
-			if err := importLine(tx, line); err != nil {
+			if err := importLine(tx, line, schema); err != nil {
 				return fmt.Errorf("line %d: %w", lineNo, err)
 			}
 		}
@@ -320,7 +347,16 @@ func readLine(br *bufio.Reader) ([]byte, error) {
 	return line, nil
 }
 
-func importLine(tx *sql.Tx, line []byte) error {
+// decodeRecord is strict: a field the binary does not know about means the
+// dump came from something this code cannot faithfully load, and silently
+// dropping it would lose data.
+func decodeRecord(line []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
+func importLine(tx *sql.Tx, line []byte, schema int) error {
 	var probe struct {
 		Record string `json:"record"`
 	}
@@ -330,38 +366,43 @@ func importLine(tx *sql.Tx, line []byte) error {
 	switch probe.Record {
 	case "setting":
 		var r dumpSetting
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec("INSERT INTO settings (key, value) VALUES (?, ?)", r.Key, r.Value)
 		return err
 	case "status":
 		var r dumpStatus
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec("INSERT INTO statuses (id, name, type, position) VALUES (?, ?, ?, ?)", r.ID, r.Name, r.Type, r.Position)
 		return err
 	case "project":
 		var r dumpProject
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
+		// Schema 3 replaced the "active" project state with Linear's
+		// vocabulary; an older dump still carries the old word.
+		if schema < 3 && r.Status == "active" {
+			r.Status = "started"
+		}
 		_, err := tx.Exec(
-			"INSERT INTO projects (id, name, slug, description, status, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			r.ID, r.Name, r.Slug, r.Description, r.Status, r.CreatedAt, r.UpdatedAt, r.ArchivedAt,
+			"INSERT INTO projects (id, name, slug, description, status, start_date, target_date, created_at, updated_at, completed_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			r.ID, r.Name, r.Slug, r.Description, r.Status, r.StartDate, r.TargetDate, r.CreatedAt, r.UpdatedAt, r.CompletedAt, r.ArchivedAt,
 		)
 		return err
 	case "label":
 		var r dumpLabel
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec("INSERT INTO labels (id, name, color) VALUES (?, ?, ?)", r.ID, r.Name, r.Color)
 		return err
 	case "milestone":
 		var r dumpMilestone
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec(
@@ -371,48 +412,48 @@ func importLine(tx *sql.Tx, line []byte) error {
 		return err
 	case "issue":
 		var r dumpIssue
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec(
-			"INSERT INTO issues (id, key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			r.ID, r.Key, r.Title, r.Description, r.StatusID, r.Priority, r.ProjectID, r.ParentID, r.Assignee, r.MilestoneID, r.DueDate, r.CreatedAt, r.UpdatedAt, r.StartedAt, r.CompletedAt, r.CanceledAt, r.ArchivedAt,
+			"INSERT INTO issues (id, key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, version, idempotency_key, created_at, updated_at, started_at, completed_at, canceled_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			r.ID, r.Key, r.Title, r.Description, r.StatusID, r.Priority, r.ProjectID, r.ParentID, r.Assignee, r.MilestoneID, r.DueDate, r.Version, r.IdempotencyKey, r.CreatedAt, r.UpdatedAt, r.StartedAt, r.CompletedAt, r.CanceledAt, r.ArchivedAt,
 		)
 		return err
 	case "issue_label":
 		var r dumpIssueLabel
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec("INSERT INTO issue_labels (issue_id, label_id) VALUES (?, ?)", r.IssueID, r.LabelID)
 		return err
 	case "project_label":
 		var r dumpProjectLabel
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec("INSERT INTO project_labels (project_id, label_id) VALUES (?, ?)", r.ProjectID, r.LabelID)
 		return err
 	case "comment":
 		var r dumpComment
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec(
-			"INSERT INTO comments (id, issue_id, body, actor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-			r.ID, r.IssueID, r.Body, r.Actor, r.CreatedAt, r.UpdatedAt,
+			"INSERT INTO comments (id, issue_id, body, actor, parent_id, idempotency_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			r.ID, r.IssueID, r.Body, r.Actor, r.ParentID, r.IdempotencyKey, r.CreatedAt, r.UpdatedAt,
 		)
 		return err
 	case "relation":
 		var r dumpRelation
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec("INSERT INTO issue_relations (issue_id, related_id, type) VALUES (?, ?, ?)", r.IssueID, r.RelatedID, r.Type)
 		return err
 	case "token":
 		var r dumpToken
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		_, err := tx.Exec(
@@ -422,7 +463,7 @@ func importLine(tx *sql.Tx, line []byte) error {
 		return err
 	case "event":
 		var r dumpEvent
-		if err := json.Unmarshal(line, &r); err != nil {
+		if err := decodeRecord(line, &r); err != nil {
 			return err
 		}
 		var before, after any

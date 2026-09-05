@@ -7,10 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
-	"strings"
 	"time"
 )
+
+// snapshotName matches exactly what Backup writes, so pruning can never touch
+// a file that happens to sit in the backup directory.
+var snapshotName = regexp.MustCompile(`^trackd-\d{8}-\d{6}(-\d+)?\.db$`)
 
 // Backup writes a verified snapshot of the live database into dir and returns
 // its path. Snapshots are full databases produced by VACUUM INTO and checked
@@ -78,14 +82,11 @@ func (s *Store) vacuumIntoContext(ctx context.Context, dest string) (string, err
 	done := make(chan error, 1)
 	go func() {
 		done <- func() error {
-			db, err := sql.Open("sqlite", s.path)
+			db, err := sql.Open("sqlite", dataSourceName(s.path, s.readOnly))
 			if err != nil {
 				return err
 			}
 			defer db.Close()
-			if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
-				return err
-			}
 			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
 				return err
 			}
@@ -104,11 +105,11 @@ func (s *Store) vacuumIntoContext(ctx context.Context, dest string) (string, err
 		return dest, nil
 	case <-ctx.Done():
 		// The goroutine may be wedged in an uninterruptible filesystem call;
-		// discard whatever it produces whenever it finally returns.
+		// whatever it leaves behind is a partial snapshot nobody may mistake
+		// for a good one, so remove it whenever the call finally returns.
 		go func() {
-			if err := <-done; err == nil {
-				_ = os.Remove(dest)
-			}
+			<-done
+			_ = os.Remove(dest)
 		}()
 		return "", ctx.Err()
 	}
@@ -124,7 +125,7 @@ func verifyIntegrity(path string) error {
 	if info.Size() == 0 {
 		return fmt.Errorf("%s is empty", path)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dataSourceName(path, true))
 	if err != nil {
 		return err
 	}
@@ -140,7 +141,10 @@ func verifyIntegrity(path string) error {
 }
 
 // PruneBackups removes the oldest trackd-*.db snapshots in dir beyond keep,
-// ordered by modification time. It returns the removed paths.
+// ordered by modification time. Files that fail their integrity check are
+// neither counted nor removed: a corrupt snapshot is evidence, and deleting
+// it could take the last good copy's place in the count. Returns the removed
+// paths.
 func PruneBackups(dir string, keep int) ([]string, error) {
 	if keep < 1 {
 		return nil, fmt.Errorf("keep must be >= 1, got %d", keep)
@@ -155,15 +159,18 @@ func PruneBackups(dir string, keep int) ([]string, error) {
 	}
 	var snaps []snap
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "trackd-") || !strings.HasSuffix(name, ".db") {
+		if e.IsDir() || !snapshotName.MatchString(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			return nil, err
 		}
-		snaps = append(snaps, snap{path: filepath.Join(dir, name), mod: info.ModTime()})
+		path := filepath.Join(dir, e.Name())
+		if err := verifyIntegrity(path); err != nil {
+			continue
+		}
+		snaps = append(snaps, snap{path: path, mod: info.ModTime()})
 	}
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].mod.After(snaps[j].mod) })
 	var removed []string
@@ -176,14 +183,53 @@ func PruneBackups(dir string, keep int) ([]string, error) {
 	return removed, nil
 }
 
+// NewestBackupAge reports how long ago the newest snapshot in dir was written.
+// The bool is false when the directory holds no snapshot at all, which is what
+// the server's startup rule needs to tell "too soon" from "never".
+func NewestBackupAge(dir string) (time.Duration, bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, false
+	}
+	var newest time.Time
+	for _, e := range entries {
+		if e.IsDir() || !snapshotName.MatchString(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if newest.IsZero() {
+		return 0, false
+	}
+	age := time.Since(newest)
+	if age < 0 {
+		age = 0
+	}
+	return age, true
+}
+
 // Restore copies a verified snapshot to dbPath. It refuses to overwrite an
-// existing database: moving the old file aside first is a deliberate step.
+// existing database, and it refuses when the write-ahead log or shared-memory
+// sidecars are present: those belong to a database that is still open, and a
+// restore under a running server would be silently undone.
 func Restore(snapshot, dbPath string) error {
 	if err := verifyIntegrity(snapshot); err != nil {
 		return fmt.Errorf("refusing to restore: %w", err)
 	}
 	if _, err := os.Stat(dbPath); err == nil {
 		return fmt.Errorf("refusing to overwrite existing database %s; move it aside first", dbPath)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		sidecar := dbPath + suffix
+		if _, err := os.Stat(sidecar); err == nil {
+			return fmt.Errorf("refusing to restore: %s exists, so a trackd still has %s open; stop it and move the sidecars aside first", sidecar, dbPath)
+		}
 	}
 	src, err := os.Open(snapshot)
 	if err != nil {
@@ -203,5 +249,18 @@ func Restore(snapshot, dbPath string) error {
 		dst.Close()
 		return err
 	}
-	return dst.Close()
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	if err := verifyIntegrity(dbPath); err != nil {
+		_ = os.Remove(dbPath)
+		return fmt.Errorf("restored file failed its integrity check: %w", err)
+	}
+	// The copy is durable only once the directory entry pointing at it is.
+	dir, err := os.Open(filepath.Dir(dbPath))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }

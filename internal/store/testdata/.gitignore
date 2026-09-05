@@ -1,0 +1,3 @@
+# The repo root ignores *.jsonl (they are database dumps); these fixtures are
+# test input and belong in the tree.
+!*.jsonl

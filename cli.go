@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -46,6 +46,16 @@ func (c *commonFlags) client() *client.Client {
 	return client.New(base, token)
 }
 
+// usageError is a mistake in the command line rather than a failure at the
+// server. It exits 2, the same code the API's validation errors get.
+type usageError struct{ msg string }
+
+func (e *usageError) Error() string { return e.msg }
+
+func usagef(format string, args ...any) error {
+	return &usageError{msg: fmt.Sprintf(format, args...)}
+}
+
 func printJSON(v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -61,9 +71,20 @@ type stringSlice []string
 func (s *stringSlice) String() string     { return strings.Join(*s, ",") }
 func (s *stringSlice) Set(v string) error { *s = append(*s, v); return nil }
 
+func (s *stringSlice) hasEmpty() bool {
+	for _, v := range *s {
+		if v == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // readValue returns v, or all of stdin when v is "-", so long markdown bodies
-// can be piped in.
-func readValue(v string) (string, error) {
+// can be piped in. Empty stdin is a mistake, never an instruction to write an
+// empty description: a pipeline that produced nothing would otherwise wipe the
+// field it was meant to fill.
+func readValue(flagName, v string) (string, error) {
 	if v != "-" {
 		return v, nil
 	}
@@ -71,26 +92,93 @@ func readValue(v string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(string(b), "\n"), nil
+	text := strings.TrimRight(string(b), "\n")
+	if strings.TrimSpace(text) == "" {
+		return "", usagef("--%s -: stdin was empty", flagName)
+	}
+	return text, nil
 }
 
-// leadingArgs splits n positional arguments that must come before any flags,
-// e.g. "trackd issue update TSK-1 --status Done".
-func leadingArgs(args []string, n int, usage string) ([]string, []string, error) {
-	if len(args) < n {
-		return nil, nil, fmt.Errorf("usage: %s", usage)
-	}
-	for _, a := range args[:n] {
-		if strings.HasPrefix(a, "-") {
-			return nil, nil, fmt.Errorf("usage: %s", usage)
+// parseArgs parses flags and pulls out n positional arguments, which may sit
+// anywhere among the flags: "issue show --json TSK-1" and "issue show TSK-1
+// --json" are the same command.
+func parseArgs(fs *flag.FlagSet, args []string, n int, usage string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
 		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
 	}
-	return args[:n], args[n:], nil
+	if len(positional) != n {
+		return nil, usagef("usage: %s", usage)
+	}
+	if err := checkEmptyFlags(fs); err != nil {
+		return nil, err
+	}
+	return positional, nil
 }
+
+// parseFlags is parseArgs for a command that takes no positional arguments.
+func parseFlags(fs *flag.FlagSet, args []string, usage string) error {
+	_, err := parseArgs(fs, args, 0, usage)
+	return err
+}
+
+// checkEmptyFlags rejects a flag given a bare empty string. Clearing a field is
+// explicit (--clear-project and friends), so an empty value is almost always a
+// shell variable that did not expand.
+func checkEmptyFlags(fs *flag.FlagSet) error {
+	var bad string
+	fs.Visit(func(f *flag.Flag) {
+		if bad != "" {
+			return
+		}
+		if s, ok := f.Value.(*stringSlice); ok {
+			if s.hasEmpty() {
+				bad = f.Name
+			}
+			return
+		}
+		if f.Value.String() == "" {
+			bad = f.Name
+		}
+	})
+	if bad == "" {
+		return nil
+	}
+	if fs.Lookup("clear-"+bad) != nil {
+		return usagef("--%s was given an empty value; use --clear-%s to clear the field", bad, bad)
+	}
+	return usagef("--%s was given an empty value", bad)
+}
+
+// setFlags reports which flags were given on the command line, so a patch can
+// send only the fields the user actually named.
+func setFlags(fs *flag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+// clearFlag registers a --clear-<name> boolean. Clearing is its own flag so
+// that no empty string can ever silently erase a field.
+func clearFlag(fs *flag.FlagSet, name, what string) *bool {
+	return fs.Bool("clear-"+name, false, "clear the "+what)
+}
+
+// strp is the pointer form used by every patch type: a set field, an unset one
+// (nil), or an explicit clear (a pointer to "").
+func strp(s string) *string { return &s }
 
 func cmdIssue(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: trackd issue <list|show|create|update|comment|relate|events> [flags]")
+		return usagef("usage: trackd issue <list|show|create|update|append|comment|relate|events> [flags]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -102,6 +190,8 @@ func cmdIssue(args []string) error {
 		return issueCreate(rest)
 	case "update":
 		return issueUpdate(rest)
+	case "append":
+		return issueAppend(rest)
 	case "comment":
 		return issueComment(rest)
 	case "relate":
@@ -109,53 +199,51 @@ func cmdIssue(args []string) error {
 	case "events":
 		return issueEvents(rest)
 	default:
-		return fmt.Errorf("unknown issue subcommand %q", sub)
+		return usagef("unknown issue subcommand %q", sub)
 	}
 }
 
 func issueList(args []string) error {
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	common := addCommon(fs)
-	status := fs.String("status", "", "filter by status name")
-	statusType := fs.String("type", "", "filter by status type (triage|backlog|unstarted|started|completed|canceled)")
+	var statuses, types, labels, excludeLabels stringSlice
+	fs.Var(&statuses, "status", "filter by status name (repeatable, matches any)")
+	fs.Var(&types, "type", "filter by status type: triage|backlog|unstarted|started|completed|canceled (repeatable)")
+	fs.Var(&labels, "label", "filter by label (repeatable, matches all)")
+	fs.Var(&excludeLabels, "exclude-label", "exclude issues carrying this label (repeatable)")
 	project := fs.String("project", "", "filter by project slug")
-	label := fs.String("label", "", "filter by label")
 	parent := fs.String("parent", "", "filter by parent issue key")
 	assignee := fs.String("assignee", "", "filter by assignee name")
 	milestone := fs.String("milestone", "", "filter by milestone name")
-	query := fs.String("q", "", "substring search over key, title, and description")
+	query := fs.String("q", "", "substring search over key, title, description and comments")
 	updatedSince := fs.String("updated-since", "", "only issues updated at or after this RFC3339 time")
+	completedSince := fs.String("completed-since", "", "only issues completed at or after this RFC3339 time")
 	archived := fs.Bool("archived", false, "include archived issues")
-	limit := fs.Int("limit", 0, "maximum results (default 100)")
+	archivedOnly := fs.Bool("archived-only", false, "only archived issues")
+	orderBy := fs.String("order-by", "", "sort order: updated (default), created, priority")
+	limit := fs.Int("limit", 0, "maximum results (default 100, max 500)")
 	offset := fs.Int("offset", 0, "skip this many results")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args, "trackd issue list [flags]"); err != nil {
 		return err
 	}
-	q := url.Values{}
-	for k, v := range map[string]string{
-		"status": *status, "status_type": *statusType, "project": *project,
-		"label": *label, "parent": *parent, "assignee": *assignee, "milestone": *milestone,
-		"q": *query, "updated_since": *updatedSince,
-	} {
-		if v != "" {
-			q.Set(k, v)
-		}
+	q := client.IssueQuery{
+		Statuses: statuses, StatusTypes: types, Labels: labels, ExcludeLabels: excludeLabels,
+		Project: *project, Parent: *parent, Assignee: *assignee, Milestone: *milestone,
+		Query: *query, UpdatedSince: *updatedSince, CompletedSince: *completedSince,
+		OrderBy: *orderBy, Limit: *limit, Offset: *offset,
 	}
-	if *archived {
-		q.Set("archived", "true")
+	switch {
+	case *archivedOnly:
+		q.Archived = "only"
+	case *archived:
+		q.Archived = "true"
 	}
-	if *limit > 0 {
-		q.Set("limit", strconv.Itoa(*limit))
-	}
-	if *offset > 0 {
-		q.Set("offset", strconv.Itoa(*offset))
-	}
-	var issues []store.Issue
-	if err := common.client().Do("GET", "/api/v1/issues", q, nil, &issues); err != nil {
+	issues, next, err := common.client().ListIssues(q)
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
-		return printJSON(issues)
+		return printJSON(map[string]any{"issues": issues, "next_offset": next})
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "KEY\tSTATUS\tPRI\tPROJECT\tASSIGNEE\tLABELS\tTITLE")
@@ -163,37 +251,40 @@ func issueList(args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 			i.Key, i.Status, i.Priority, i.Project, i.Assignee, strings.Join(i.Labels, ","), truncate(i.Title, 70))
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if next != nil {
+		fmt.Printf("more results: --offset %d\n", *next)
+	}
+	return nil
 }
 
 func issueShow(args []string) error {
-	lead, rest, err := leadingArgs(args, 1, "trackd issue show <key> [flags]")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("issue show", flag.ContinueOnError)
 	common := addCommon(fs)
-	if err := fs.Parse(rest); err != nil {
+	lead, err := parseArgs(fs, args, 1, "trackd issue show <key> [flags]")
+	if err != nil {
 		return err
 	}
 	key := lead[0]
 	c := common.client()
-	var issue store.Issue
-	if err := c.Do("GET", "/api/v1/issues/"+key, nil, nil, &issue); err != nil {
+	issue, err := c.GetIssue(key)
+	if err != nil {
 		return err
 	}
-	var comments []store.Comment
-	if err := c.Do("GET", "/api/v1/issues/"+key+"/comments", nil, nil, &comments); err != nil {
+	comments, err := c.ListComments(key)
+	if err != nil {
 		return err
 	}
-	var relations []store.Relation
-	if err := c.Do("GET", "/api/v1/issues/"+key+"/relations", nil, nil, &relations); err != nil {
+	relations, err := c.ListRelations(key)
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
 		return printJSON(map[string]any{"issue": issue, "comments": comments, "relations": relations})
 	}
-	fmt.Printf("%s  %s (%s)  priority %d\n", issue.Key, issue.Status, issue.StatusType, issue.Priority)
+	fmt.Printf("%s  %s (%s)  priority %d  version %d\n", issue.Key, issue.Status, issue.StatusType, issue.Priority, issue.Version)
 	fmt.Println(issue.Title)
 	fmt.Println()
 	fmt.Printf("project: %s  parent: %s  due: %s\n", orDash(issue.Project), orDash(issue.Parent), orDash(issue.DueDate))
@@ -222,7 +313,11 @@ func issueShow(args []string) error {
 			if who == "" {
 				who = "unknown"
 			}
-			fmt.Printf("  [%s %s] %s\n", c.CreatedAt, who, c.Body)
+			reply := ""
+			if c.ParentID != 0 {
+				reply = fmt.Sprintf(" reply to %d", c.ParentID)
+			}
+			fmt.Printf("  [%d %s %s%s] %s\n", c.ID, c.CreatedAt, who, reply, c.Body)
 		}
 	}
 	return nil
@@ -241,48 +336,22 @@ func issueCreate(args []string) error {
 	milestone := fs.String("milestone", "", "milestone name within the project")
 	due := fs.String("due", "", "due date (YYYY-MM-DD)")
 	var labels stringSlice
-	fs.Var(&labels, "label", "label to apply (repeatable)")
+	fs.Var(&labels, "label", "label to apply (repeatable; the label must already exist)")
+	idempotencyKey := fs.String("idempotency-key", "", "repeat-safe key: a second create with the same key returns the first issue")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args, "trackd issue create --title <title> [flags]"); err != nil {
 		return err
 	}
-	desc, err := readValue(*description)
+	desc, err := readValue("description", *description)
 	if err != nil {
 		return err
 	}
-	body := map[string]any{"title": *title}
-	if desc != "" {
-		body["description"] = desc
-	}
-	if *status != "" {
-		body["status"] = *status
-	}
-	if *priority != 0 {
-		body["priority"] = *priority
-	}
-	if *project != "" {
-		body["project"] = *project
-	}
-	if *parent != "" {
-		body["parent"] = *parent
-	}
-	if *assignee != "" {
-		body["assignee"] = *assignee
-	}
-	if *milestone != "" {
-		body["milestone"] = *milestone
-	}
-	if *due != "" {
-		body["due_date"] = *due
-	}
-	if len(labels) > 0 {
-		body["labels"] = []string(labels)
-	}
-	if *actor != "" {
-		body["actor"] = *actor
-	}
-	var issue store.Issue
-	if err := common.client().Do("POST", "/api/v1/issues", nil, body, &issue); err != nil {
+	issue, err := common.client().CreateIssue(client.IssueCreate{
+		Title: *title, Description: desc, Status: *status, Priority: *priority,
+		Project: *project, Parent: *parent, Assignee: *assignee, Milestone: *milestone,
+		DueDate: *due, Labels: labels, Actor: *actor, IdempotencyKey: *idempotencyKey,
+	})
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
@@ -293,136 +362,264 @@ func issueCreate(args []string) error {
 }
 
 func issueUpdate(args []string) error {
-	lead, rest, err := leadingArgs(args, 1, "trackd issue update <key> [flags]")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("issue update", flag.ContinueOnError)
 	common := addCommon(fs)
 	title := fs.String("title", "", "new title")
-	description := fs.String("description", "", "new description; use - to read stdin")
+	description := fs.String("description", "", "replacement description; use - to read stdin (needs --replace-description when one is already written)")
+	replaceDescription := fs.Bool("replace-description", false, "allow --description to overwrite an existing description")
+	appendText := fs.String("append", "", "text to add to the end of the description; use - to read stdin")
 	status := fs.String("status", "", "new status")
 	priority := fs.Int("priority", 0, "new priority 0-4")
-	project := fs.String("project", "", "project slug; empty string clears")
-	parent := fs.String("parent", "", "parent issue key; empty string clears")
-	assignee := fs.String("assignee", "", "assignee name; empty string clears")
-	milestone := fs.String("milestone", "", "milestone name; empty string clears")
-	due := fs.String("due", "", "due date; empty string clears")
-	labelsCSV := fs.String("labels", "", "comma-separated labels, replacing the current set; empty string clears")
+	project := fs.String("project", "", "project slug")
+	parent := fs.String("parent", "", "parent issue key")
+	assignee := fs.String("assignee", "", "assignee name")
+	milestone := fs.String("milestone", "", "milestone name within the project")
+	due := fs.String("due", "", "due date (YYYY-MM-DD)")
+	labelsCSV := fs.String("labels", "", "comma-separated labels, replacing the current set")
+	var addLabels, removeLabels stringSlice
+	fs.Var(&addLabels, "add-label", "label to add, keeping the others (repeatable)")
+	fs.Var(&removeLabels, "remove-label", "label to remove (repeatable)")
+	expectedVersion := fs.Int64("expected-version", -1, "fail with a conflict unless the issue is still at this version")
+	clearDescription := clearFlag(fs, "description", "description (implies --replace-description)")
+	clearLabels := clearFlag(fs, "labels", "whole label set")
+	clearProject := clearFlag(fs, "project", "project")
+	clearParent := clearFlag(fs, "parent", "parent")
+	clearAssignee := clearFlag(fs, "assignee", "assignee")
+	clearMilestone := clearFlag(fs, "milestone", "milestone")
+	clearDue := clearFlag(fs, "due", "due date")
 	archive := fs.Bool("archive", false, "archive the issue")
 	unarchive := fs.Bool("unarchive", false, "unarchive the issue")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	if err := fs.Parse(rest); err != nil {
+	lead, err := parseArgs(fs, args, 1, "trackd issue update <key> [flags]")
+	if err != nil {
 		return err
 	}
-	set := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	set := setFlags(fs)
+	key := lead[0]
+	c := common.client()
 
-	body := map[string]any{}
+	patch := client.IssuePatch{Actor: *actor, ReplaceDescription: *replaceDescription}
 	if set["title"] {
-		body["title"] = *title
+		patch.Title = strp(*title)
+	}
+	if set["description"] && *clearDescription {
+		return usagef("--description and --clear-description do the same job; pick one")
 	}
 	if set["description"] {
-		desc, err := readValue(*description)
+		desc, err := readValue("description", *description)
 		if err != nil {
 			return err
 		}
-		body["description"] = desc
+		patch.Description = strp(desc)
+	}
+	if *clearDescription {
+		patch.Description = strp("")
+		patch.ReplaceDescription = true
 	}
 	if set["status"] {
-		body["status"] = *status
+		patch.Status = strp(*status)
 	}
 	if set["priority"] {
-		body["priority"] = *priority
+		patch.Priority = priority
 	}
-	if set["project"] {
-		body["project"] = *project
+	for _, f := range []struct {
+		name  string
+		value *string
+		clear *bool
+		dst   **string
+	}{
+		{"project", project, clearProject, &patch.Project},
+		{"parent", parent, clearParent, &patch.Parent},
+		{"assignee", assignee, clearAssignee, &patch.Assignee},
+		{"milestone", milestone, clearMilestone, &patch.Milestone},
+		{"due", due, clearDue, &patch.DueDate},
+	} {
+		if set[f.name] && *f.clear {
+			return usagef("--%s and --clear-%s do the same job; pick one", f.name, f.name)
+		}
+		switch {
+		case set[f.name]:
+			*f.dst = strp(*f.value)
+		case *f.clear:
+			*f.dst = strp("")
+		}
 	}
-	if set["parent"] {
-		body["parent"] = *parent
+	if (set["labels"] || *clearLabels) && (len(addLabels) > 0 || len(removeLabels) > 0) {
+		return usagef("--labels replaces the whole set; it cannot be combined with --add-label or --remove-label")
 	}
-	if set["assignee"] {
-		body["assignee"] = *assignee
-	}
-	if set["milestone"] {
-		body["milestone"] = *milestone
-	}
-	if set["due"] {
-		body["due_date"] = *due
+	if set["labels"] && *clearLabels {
+		return usagef("--labels and --clear-labels do the same job; pick one")
 	}
 	if set["labels"] {
-		body["labels"] = splitCSV(*labelsCSV)
+		replacement := splitCSV(*labelsCSV)
+		patch.Labels = &replacement
+	}
+	if *clearLabels {
+		empty := []string{}
+		patch.Labels = &empty
+	}
+	patch.AddLabels = addLabels
+	patch.RemoveLabels = removeLabels
+	if set["expected-version"] {
+		patch.ExpectedVersion = expectedVersion
+	}
+	if *archive && *unarchive {
+		return usagef("--archive and --unarchive contradict each other")
 	}
 	if *archive {
-		body["archived"] = true
+		patch.Archived = archive
 	}
 	if *unarchive {
-		body["archived"] = false
+		no := false
+		patch.Archived = &no
 	}
-	if *actor != "" {
-		body["actor"] = *actor
+
+	// An append is its own request: the server refuses to overwrite a written
+	// description, so appending and patching cannot share one call.
+	if set["append"] {
+		text, err := readValue("append", *appendText)
+		if err != nil {
+			return err
+		}
+		issue, err := c.AppendDescription(key, text, *actor)
+		if err != nil {
+			return err
+		}
+		if isEmptyPatch(patch) {
+			return reportIssue(issue, *common.jsonOut, "updated")
+		}
 	}
-	var issue store.Issue
-	if err := common.client().Do("PATCH", "/api/v1/issues/"+lead[0], nil, body, &issue); err != nil {
+	if isEmptyPatch(patch) && !set["append"] {
+		return usagef("nothing to update: give at least one field flag")
+	}
+	issue, err := c.UpdateIssue(key, patch)
+	if err != nil {
 		return err
 	}
-	if *common.jsonOut {
+	return reportIssue(issue, *common.jsonOut, "updated")
+}
+
+// isEmptyPatch reports whether a patch would send no field at all, which is a
+// mistyped command rather than a request worth making.
+func isEmptyPatch(p client.IssuePatch) bool {
+	return p.Title == nil && p.Description == nil && p.Status == nil && p.Priority == nil &&
+		p.Project == nil && p.Parent == nil && p.Assignee == nil && p.Milestone == nil &&
+		p.DueDate == nil && p.Labels == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0 &&
+		p.Archived == nil
+}
+
+func reportIssue(issue *store.Issue, jsonOut bool, verb string) error {
+	if jsonOut {
 		return printJSON(issue)
 	}
-	fmt.Printf("%s updated (%s)\n", issue.Key, issue.Status)
+	fmt.Printf("%s %s (%s, version %d)\n", issue.Key, verb, issue.Status, issue.Version)
 	return nil
 }
 
-func issueComment(args []string) error {
-	lead, rest, err := leadingArgs(args, 1, "trackd issue comment <key> --body <text> [flags]")
+func issueAppend(args []string) error {
+	fs := flag.NewFlagSet("issue append", flag.ContinueOnError)
+	common := addCommon(fs)
+	text := fs.String("text", "", "text to add to the end of the description; use - to read stdin")
+	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
+	lead, err := parseArgs(fs, args, 1, "trackd issue append <key> --text <text>")
 	if err != nil {
 		return err
 	}
+	if *text == "" {
+		return usagef("usage: trackd issue append <key> --text <text>")
+	}
+	body, err := readValue("text", *text)
+	if err != nil {
+		return err
+	}
+	issue, err := common.client().AppendDescription(lead[0], body, *actor)
+	if err != nil {
+		return err
+	}
+	return reportIssue(issue, *common.jsonOut, "appended")
+}
+
+func issueComment(args []string) error {
 	fs := flag.NewFlagSet("issue comment", flag.ContinueOnError)
 	common := addCommon(fs)
 	bodyFlag := fs.String("body", "", "comment body (required); use - to read stdin")
+	parent := fs.Int64("parent", 0, "reply to this comment id")
+	idempotencyKey := fs.String("idempotency-key", "", "repeat-safe key: a second comment with the same key returns the first")
 	actor := fs.String("actor", "", "actor recorded on the comment (default: token name)")
-	if err := fs.Parse(rest); err != nil {
-		return err
-	}
-	text, err := readValue(*bodyFlag)
+	lead, err := parseArgs(fs, args, 1, "trackd issue comment <key> --body <text> [flags]")
 	if err != nil {
 		return err
 	}
-	body := map[string]any{"body": text}
-	if *actor != "" {
-		body["actor"] = *actor
+	if *bodyFlag == "" {
+		return usagef("usage: trackd issue comment <key> --body <text> [flags]")
 	}
-	var comment store.Comment
-	if err := common.client().Do("POST", "/api/v1/issues/"+lead[0]+"/comments", nil, body, &comment); err != nil {
+	text, err := readValue("body", *bodyFlag)
+	if err != nil {
+		return err
+	}
+	comment, err := common.client().AddComment(lead[0], client.CommentCreate{
+		Body: text, ParentID: *parent, Actor: *actor, IdempotencyKey: *idempotencyKey,
+	})
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
 		return printJSON(comment)
 	}
-	fmt.Printf("comment added to %s as %s\n", comment.IssueKey, comment.Actor)
+	fmt.Printf("comment %d added to %s as %s\n", comment.ID, comment.IssueKey, orDash(comment.Actor))
+	return nil
+}
+
+func cmdComment(args []string) error {
+	if len(args) == 0 {
+		return usagef("usage: trackd comment edit <id> --body <text> [flags]")
+	}
+	sub, rest := args[0], args[1:]
+	if sub != "edit" {
+		return usagef("unknown comment subcommand %q", sub)
+	}
+	fs := flag.NewFlagSet("comment edit", flag.ContinueOnError)
+	common := addCommon(fs)
+	bodyFlag := fs.String("body", "", "replacement body (required); use - to read stdin")
+	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
+	lead, err := parseArgs(fs, rest, 1, "trackd comment edit <id> --body <text> [flags]")
+	if err != nil {
+		return err
+	}
+	id, err := strconv.ParseInt(lead[0], 10, 64)
+	if err != nil {
+		return usagef("comment id must be a number, got %q", lead[0])
+	}
+	if *bodyFlag == "" {
+		return usagef("usage: trackd comment edit <id> --body <text> [flags]")
+	}
+	text, err := readValue("body", *bodyFlag)
+	if err != nil {
+		return err
+	}
+	comment, err := common.client().UpdateComment(id, text, *actor)
+	if err != nil {
+		return err
+	}
+	if *common.jsonOut {
+		return printJSON(comment)
+	}
+	fmt.Printf("comment %d edited on %s\n", comment.ID, comment.IssueKey)
 	return nil
 }
 
 func issueRelate(args []string) error {
-	lead, rest, err := leadingArgs(args, 2, "trackd issue relate <key> <related-key> --type <blocks|relates|duplicate> [--remove]")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("issue relate", flag.ContinueOnError)
 	common := addCommon(fs)
 	typ := fs.String("type", "relates", "relation type: blocks, relates, or duplicate")
 	remove := fs.Bool("remove", false, "remove the relation instead of adding it")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	if err := fs.Parse(rest); err != nil {
+	lead, err := parseArgs(fs, args, 2, "trackd issue relate <key> <related-key> --type <blocks|relates|duplicate> [--remove]")
+	if err != nil {
 		return err
 	}
-	body := map[string]any{"related": lead[1], "type": *typ, "remove": *remove}
-	if *actor != "" {
-		body["actor"] = *actor
-	}
-	var relations []store.Relation
-	if err := common.client().Do("POST", "/api/v1/issues/"+lead[0]+"/relations", nil, body, &relations); err != nil {
+	relations, err := common.client().SaveRelation(lead[0], lead[1], *typ, *remove, *actor)
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
@@ -438,38 +635,72 @@ func issueRelate(args []string) error {
 }
 
 func issueEvents(args []string) error {
-	lead, rest, err := leadingArgs(args, 1, "trackd issue events <key> [flags]")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("issue events", flag.ContinueOnError)
 	common := addCommon(fs)
 	limit := fs.Int("limit", 0, "maximum events (default 100)")
-	if err := fs.Parse(rest); err != nil {
+	lead, err := parseArgs(fs, args, 1, "trackd issue events <key> [flags]")
+	if err != nil {
 		return err
 	}
-	q := url.Values{}
-	if *limit > 0 {
-		q.Set("limit", strconv.Itoa(*limit))
-	}
-	var events []store.Event
-	if err := common.client().Do("GET", "/api/v1/issues/"+lead[0]+"/events", q, nil, &events); err != nil {
+	events, err := common.client().ListIssueEvents(lead[0], *limit)
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
 		return printJSON(events)
 	}
+	return printEvents(events, false)
+}
+
+// cmdEvents is the global activity feed: everything that happened, in the order
+// it happened, with a cursor to pick up from next time.
+func cmdEvents(args []string) error {
+	fs := flag.NewFlagSet("events", flag.ContinueOnError)
+	common := addCommon(fs)
+	since := fs.String("since", "", "only events at or after this RFC3339 time")
+	afterID := fs.Int64("after-id", 0, "only events after this event id (the cursor from a previous run)")
+	entity := fs.String("entity", "", "filter by entity type: issue, comment, project, milestone, label, relation, token")
+	limit := fs.Int("limit", 0, "maximum events (default 100, max 1000)")
+	if err := parseFlags(fs, args, "trackd events [flags]"); err != nil {
+		return err
+	}
+	events, next, err := common.client().ListEvents(client.EventQuery{
+		Since: *since, AfterID: *afterID, Entity: *entity, Limit: *limit,
+	})
+	if err != nil {
+		return err
+	}
+	if *common.jsonOut {
+		return printJSON(map[string]any{"events": events, "next_after_id": next})
+	}
+	if err := printEvents(events, true); err != nil {
+		return err
+	}
+	if next != nil {
+		fmt.Printf("more events: --after-id %d\n", *next)
+	}
+	return nil
+}
+
+func printEvents(events []store.Event, withEntity bool) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "TIME\tACTION\tACTOR")
-	for _, e := range events {
-		fmt.Fprintf(w, "%s\t%s\t%s\n", e.CreatedAt, e.Action, orDash(e.Actor))
+	if withEntity {
+		fmt.Fprintln(w, "ID\tTIME\tENTITY\tACTION\tACTOR")
+		for _, e := range events {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", e.ID, e.CreatedAt, orDash(e.EntityKey), e.Action, orDash(e.Actor))
+		}
+	} else {
+		fmt.Fprintln(w, "TIME\tACTION\tACTOR")
+		for _, e := range events {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", e.CreatedAt, e.Action, orDash(e.Actor))
+		}
 	}
 	return w.Flush()
 }
 
 func cmdProject(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: trackd project <list|show|create|update> [flags]")
+		return usagef("usage: trackd project <list|show|create|update> [flags]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -482,7 +713,7 @@ func cmdProject(args []string) error {
 	case "update":
 		return projectUpdate(rest)
 	default:
-		return fmt.Errorf("unknown project subcommand %q", sub)
+		return usagef("unknown project subcommand %q", sub)
 	}
 }
 
@@ -490,40 +721,34 @@ func projectList(args []string) error {
 	fs := flag.NewFlagSet("project list", flag.ContinueOnError)
 	common := addCommon(fs)
 	archived := fs.Bool("archived", false, "include archived projects")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args, "trackd project list [flags]"); err != nil {
 		return err
 	}
-	q := url.Values{}
-	if *archived {
-		q.Set("archived", "true")
-	}
-	var projects []store.Project
-	if err := common.client().Do("GET", "/api/v1/projects", q, nil, &projects); err != nil {
+	projects, err := common.client().ListProjects(*archived)
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
 		return printJSON(projects)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "SLUG\tSTATUS\tLABELS\tNAME")
+	fmt.Fprintln(w, "SLUG\tSTATUS\tSTART\tTARGET\tLABELS\tNAME")
 	for _, p := range projects {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", p.Slug, p.Status, strings.Join(p.Labels, ","), p.Name)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			p.Slug, p.Status, orDash(p.StartDate), orDash(p.TargetDate), strings.Join(p.Labels, ","), p.Name)
 	}
 	return w.Flush()
 }
 
 func projectShow(args []string) error {
-	lead, rest, err := leadingArgs(args, 1, "trackd project show <slug> [flags]")
+	fs := flag.NewFlagSet("project show", flag.ContinueOnError)
+	common := addCommon(fs)
+	lead, err := parseArgs(fs, args, 1, "trackd project show <slug> [flags]")
 	if err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("project show", flag.ContinueOnError)
-	common := addCommon(fs)
-	if err := fs.Parse(rest); err != nil {
-		return err
-	}
-	var project store.Project
-	if err := common.client().Do("GET", "/api/v1/projects/"+lead[0], nil, nil, &project); err != nil {
+	project, err := common.client().GetProject(lead[0])
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
@@ -532,6 +757,8 @@ func projectShow(args []string) error {
 	fmt.Printf("%s  %s\n", project.Slug, project.Status)
 	fmt.Println(project.Name)
 	fmt.Printf("labels: %s\n", orDash(strings.Join(project.Labels, ",")))
+	fmt.Printf("start: %s  target: %s  completed: %s\n",
+		orDash(project.StartDate), orDash(project.TargetDate), orDash(project.CompletedAt))
 	fmt.Printf("created: %s  updated: %s\n", project.CreatedAt, project.UpdatedAt)
 	if project.Description != "" {
 		fmt.Println()
@@ -546,35 +773,24 @@ func projectCreate(args []string) error {
 	name := fs.String("name", "", "project name (required)")
 	slug := fs.String("slug", "", "project slug (default: derived from name)")
 	description := fs.String("description", "", "project description; use - to read stdin")
-	status := fs.String("status", "", "project status (default active)")
+	status := fs.String("status", "", "project status: backlog (default), planned, started, paused, completed, canceled")
+	start := fs.String("start", "", "start date (YYYY-MM-DD)")
+	target := fs.String("target", "", "target date (YYYY-MM-DD)")
 	var labels stringSlice
-	fs.Var(&labels, "label", "label to apply (repeatable)")
+	fs.Var(&labels, "label", "label to apply (repeatable; the label must already exist)")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args, "trackd project create --name <name> [flags]"); err != nil {
 		return err
 	}
-	desc, err := readValue(*description)
+	desc, err := readValue("description", *description)
 	if err != nil {
 		return err
 	}
-	body := map[string]any{"name": *name}
-	if *slug != "" {
-		body["slug"] = *slug
-	}
-	if desc != "" {
-		body["description"] = desc
-	}
-	if *status != "" {
-		body["status"] = *status
-	}
-	if len(labels) > 0 {
-		body["labels"] = []string(labels)
-	}
-	if *actor != "" {
-		body["actor"] = *actor
-	}
-	var project store.Project
-	if err := common.client().Do("POST", "/api/v1/projects", nil, body, &project); err != nil {
+	project, err := common.client().CreateProject(client.ProjectCreate{
+		Name: *name, Slug: *slug, Description: desc, Status: *status,
+		Labels: labels, StartDate: *start, TargetDate: *target, Actor: *actor,
+	})
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
@@ -585,52 +801,88 @@ func projectCreate(args []string) error {
 }
 
 func projectUpdate(args []string) error {
-	lead, rest, err := leadingArgs(args, 1, "trackd project update <slug> [flags]")
-	if err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("project update", flag.ContinueOnError)
 	common := addCommon(fs)
 	name := fs.String("name", "", "new name")
 	description := fs.String("description", "", "new description; use - to read stdin")
-	status := fs.String("status", "", "new status (active|paused|completed|canceled)")
-	labelsCSV := fs.String("labels", "", "comma-separated labels, replacing the current set; empty string clears")
+	status := fs.String("status", "", "new status: backlog, planned, started, paused, completed, canceled")
+	labelsCSV := fs.String("labels", "", "comma-separated labels, replacing the current set")
+	var addLabels, removeLabels stringSlice
+	fs.Var(&addLabels, "add-label", "label to add, keeping the others (repeatable)")
+	fs.Var(&removeLabels, "remove-label", "label to remove (repeatable)")
+	start := fs.String("start", "", "start date (YYYY-MM-DD)")
+	target := fs.String("target", "", "target date (YYYY-MM-DD)")
+	clearDescription := clearFlag(fs, "description", "description")
+	clearLabels := clearFlag(fs, "labels", "whole label set")
+	clearStart := clearFlag(fs, "start", "start date")
+	clearTarget := clearFlag(fs, "target", "target date")
 	archive := fs.Bool("archive", false, "archive the project")
 	unarchive := fs.Bool("unarchive", false, "unarchive the project")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	if err := fs.Parse(rest); err != nil {
+	lead, err := parseArgs(fs, args, 1, "trackd project update <slug> [flags]")
+	if err != nil {
 		return err
 	}
-	set := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	body := map[string]any{}
+	set := setFlags(fs)
+	patch := client.ProjectPatch{Actor: *actor, AddLabels: addLabels, RemoveLabels: removeLabels}
 	if set["name"] {
-		body["name"] = *name
-	}
-	if set["description"] {
-		desc, err := readValue(*description)
-		if err != nil {
-			return err
-		}
-		body["description"] = desc
+		patch.Name = strp(*name)
 	}
 	if set["status"] {
-		body["status"] = *status
+		patch.Status = strp(*status)
+	}
+	for _, f := range []struct {
+		name  string
+		value *string
+		clear *bool
+		dst   **string
+	}{
+		{"description", description, clearDescription, &patch.Description},
+		{"start", start, clearStart, &patch.StartDate},
+		{"target", target, clearTarget, &patch.TargetDate},
+	} {
+		if set[f.name] && *f.clear {
+			return usagef("--%s and --clear-%s do the same job; pick one", f.name, f.name)
+		}
+		switch {
+		case set[f.name]:
+			value := *f.value
+			if f.name == "description" {
+				if value, err = readValue("description", value); err != nil {
+					return err
+				}
+			}
+			*f.dst = strp(value)
+		case *f.clear:
+			*f.dst = strp("")
+		}
+	}
+	if (set["labels"] || *clearLabels) && (len(addLabels) > 0 || len(removeLabels) > 0) {
+		return usagef("--labels replaces the whole set; it cannot be combined with --add-label or --remove-label")
+	}
+	if set["labels"] && *clearLabels {
+		return usagef("--labels and --clear-labels do the same job; pick one")
 	}
 	if set["labels"] {
-		body["labels"] = splitCSV(*labelsCSV)
+		replacement := splitCSV(*labelsCSV)
+		patch.Labels = &replacement
+	}
+	if *clearLabels {
+		empty := []string{}
+		patch.Labels = &empty
+	}
+	if *archive && *unarchive {
+		return usagef("--archive and --unarchive contradict each other")
 	}
 	if *archive {
-		body["archived"] = true
+		patch.Archived = archive
 	}
 	if *unarchive {
-		body["archived"] = false
+		no := false
+		patch.Archived = &no
 	}
-	if *actor != "" {
-		body["actor"] = *actor
-	}
-	var project store.Project
-	if err := common.client().Do("PATCH", "/api/v1/projects/"+lead[0], nil, body, &project); err != nil {
+	project, err := common.client().UpdateProject(lead[0], patch)
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
@@ -642,18 +894,18 @@ func projectUpdate(args []string) error {
 
 func cmdLabel(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: trackd label <list|add> [flags]")
+		return usagef("usage: trackd label <list|add> [flags]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "list":
 		fs := flag.NewFlagSet("label list", flag.ContinueOnError)
 		common := addCommon(fs)
-		if err := fs.Parse(rest); err != nil {
+		if err := parseFlags(fs, rest, "trackd label list [flags]"); err != nil {
 			return err
 		}
-		var labels []store.Label
-		if err := common.client().Do("GET", "/api/v1/labels", nil, nil, &labels); err != nil {
+		labels, err := common.client().ListLabels()
+		if err != nil {
 			return err
 		}
 		if *common.jsonOut {
@@ -666,19 +918,15 @@ func cmdLabel(args []string) error {
 		}
 		return w.Flush()
 	case "add":
-		lead, rest, err := leadingArgs(rest, 1, "trackd label add <name> [--color <hex>]")
-		if err != nil {
-			return err
-		}
 		fs := flag.NewFlagSet("label add", flag.ContinueOnError)
 		common := addCommon(fs)
 		color := fs.String("color", "", "label color, e.g. #ff0000")
-		if err := fs.Parse(rest); err != nil {
+		lead, err := parseArgs(fs, rest, 1, "trackd label add <name> [--color <hex>]")
+		if err != nil {
 			return err
 		}
-		var label store.Label
-		body := map[string]any{"name": lead[0], "color": *color}
-		if err := common.client().Do("POST", "/api/v1/labels", nil, body, &label); err != nil {
+		label, err := common.client().CreateLabel(lead[0], *color)
+		if err != nil {
 			return err
 		}
 		if *common.jsonOut {
@@ -687,13 +935,13 @@ func cmdLabel(args []string) error {
 		fmt.Printf("label %s\n", label.Name)
 		return nil
 	default:
-		return fmt.Errorf("unknown label subcommand %q", sub)
+		return usagef("unknown label subcommand %q", sub)
 	}
 }
 
 func cmdMilestone(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: trackd milestone <list|create|update> [flags]")
+		return usagef("usage: trackd milestone <list|create|update> [flags]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -702,18 +950,11 @@ func cmdMilestone(args []string) error {
 		common := addCommon(fs)
 		project := fs.String("project", "", "filter by project slug")
 		archived := fs.Bool("archived", false, "include archived milestones")
-		if err := fs.Parse(rest); err != nil {
+		if err := parseFlags(fs, rest, "trackd milestone list [flags]"); err != nil {
 			return err
 		}
-		q := url.Values{}
-		if *project != "" {
-			q.Set("project", *project)
-		}
-		if *archived {
-			q.Set("archived", "true")
-		}
-		var milestones []store.Milestone
-		if err := common.client().Do("GET", "/api/v1/milestones", q, nil, &milestones); err != nil {
+		milestones, err := common.client().ListMilestones(*project, *archived)
+		if err != nil {
 			return err
 		}
 		if *common.jsonOut {
@@ -733,21 +974,13 @@ func cmdMilestone(args []string) error {
 		description := fs.String("description", "", "milestone description")
 		target := fs.String("target", "", "target date (YYYY-MM-DD)")
 		actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-		if err := fs.Parse(rest); err != nil {
+		if err := parseFlags(fs, rest, "trackd milestone create --project <slug> --name <name> [flags]"); err != nil {
 			return err
 		}
-		body := map[string]any{"project": *project, "name": *name}
-		if *description != "" {
-			body["description"] = *description
-		}
-		if *target != "" {
-			body["target_date"] = *target
-		}
-		if *actor != "" {
-			body["actor"] = *actor
-		}
-		var milestone store.Milestone
-		if err := common.client().Do("POST", "/api/v1/milestones", nil, body, &milestone); err != nil {
+		milestone, err := common.client().CreateMilestone(client.MilestoneCreate{
+			Project: *project, Name: *name, Description: *description, TargetDate: *target, Actor: *actor,
+		})
+		if err != nil {
 			return err
 		}
 		if *common.jsonOut {
@@ -756,44 +989,56 @@ func cmdMilestone(args []string) error {
 		fmt.Printf("milestone %d: %s (%s)\n", milestone.ID, milestone.Name, milestone.Project)
 		return nil
 	case "update":
-		lead, rest, err := leadingArgs(rest, 1, "trackd milestone update <id> [flags]")
-		if err != nil {
-			return err
-		}
 		fs := flag.NewFlagSet("milestone update", flag.ContinueOnError)
 		common := addCommon(fs)
 		name := fs.String("name", "", "new name")
 		description := fs.String("description", "", "new description")
-		target := fs.String("target", "", "target date; empty string clears")
+		target := fs.String("target", "", "target date (YYYY-MM-DD)")
+		clearDescription := clearFlag(fs, "description", "description")
+		clearTarget := clearFlag(fs, "target", "target date")
 		archive := fs.Bool("archive", false, "archive the milestone")
 		unarchive := fs.Bool("unarchive", false, "unarchive the milestone")
 		actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-		if err := fs.Parse(rest); err != nil {
+		lead, err := parseArgs(fs, rest, 1, "trackd milestone update <id> [flags]")
+		if err != nil {
 			return err
 		}
-		set := map[string]bool{}
-		fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-		body := map[string]any{}
+		set := setFlags(fs)
+		patch := client.MilestonePatch{Actor: *actor}
 		if set["name"] {
-			body["name"] = *name
+			patch.Name = strp(*name)
 		}
-		if set["description"] {
-			body["description"] = *description
+		for _, f := range []struct {
+			name  string
+			value *string
+			clear *bool
+			dst   **string
+		}{
+			{"description", description, clearDescription, &patch.Description},
+			{"target", target, clearTarget, &patch.TargetDate},
+		} {
+			if set[f.name] && *f.clear {
+				return usagef("--%s and --clear-%s do the same job; pick one", f.name, f.name)
+			}
+			switch {
+			case set[f.name]:
+				*f.dst = strp(*f.value)
+			case *f.clear:
+				*f.dst = strp("")
+			}
 		}
-		if set["target"] {
-			body["target_date"] = *target
+		if *archive && *unarchive {
+			return usagef("--archive and --unarchive contradict each other")
 		}
 		if *archive {
-			body["archived"] = true
+			patch.Archived = archive
 		}
 		if *unarchive {
-			body["archived"] = false
+			no := false
+			patch.Archived = &no
 		}
-		if *actor != "" {
-			body["actor"] = *actor
-		}
-		var milestone store.Milestone
-		if err := common.client().Do("PATCH", "/api/v1/milestones/"+lead[0], nil, body, &milestone); err != nil {
+		milestone, err := common.client().UpdateMilestone(lead[0], patch)
+		if err != nil {
 			return err
 		}
 		if *common.jsonOut {
@@ -802,18 +1047,18 @@ func cmdMilestone(args []string) error {
 		fmt.Printf("milestone %d updated\n", milestone.ID)
 		return nil
 	default:
-		return fmt.Errorf("unknown milestone subcommand %q", sub)
+		return usagef("unknown milestone subcommand %q", sub)
 	}
 }
 
 func cmdStatuses(args []string) error {
 	fs := flag.NewFlagSet("statuses", flag.ContinueOnError)
 	common := addCommon(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args, "trackd statuses [flags]"); err != nil {
 		return err
 	}
-	var statuses []store.Status
-	if err := common.client().Do("GET", "/api/v1/statuses", nil, nil, &statuses); err != nil {
+	statuses, err := common.client().ListStatuses()
+	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
@@ -830,14 +1075,90 @@ func cmdStatuses(args []string) error {
 func cmdHealth(args []string) error {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	common := addCommon(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args, "trackd health [flags]"); err != nil {
 		return err
 	}
-	var health map[string]any
-	if err := common.client().Do("GET", "/healthz", nil, nil, &health); err != nil {
+	health, status, err := common.client().Health()
+	if err != nil {
 		return err
 	}
-	return printJSON(health)
+	if err := printJSON(health); err != nil {
+		return err
+	}
+	// A degraded server answers 503. The report is already printed; the exit
+	// code is what a monitor reads.
+	if status != 200 {
+		return &client.APIError{Status: status, Code: "degraded", Message: "server reports degraded health"}
+	}
+	return nil
+}
+
+// exitCode maps an error to the process exit status. The classes are stable:
+// scripts branch on them, so a not-found stays 3 whatever the message says.
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var usage *usageError
+	if errors.As(err, &usage) || errors.Is(err, flag.ErrHelp) {
+		return 2
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) {
+		switch {
+		case apiErr.Status == 400 || apiErr.Status == 422:
+			return 2
+		case apiErr.Status == 404:
+			return 3
+		case apiErr.Status == 401 || apiErr.Status == 403:
+			return 4
+		case apiErr.Status == 409:
+			return 5
+		case apiErr.Status >= 500:
+			return 6
+		}
+		return 1
+	}
+	var transport *client.TransportError
+	if errors.As(err, &transport) {
+		return 6
+	}
+	return 1
+}
+
+// errorObject is what --json prints on failure, so a caller parsing stdout gets
+// the same machine-readable shape whether the command worked or not.
+func errorObject(err error) map[string]any {
+	obj := map[string]any{"error": err.Error(), "code": "internal", "exit": exitCode(err)}
+	var usage *usageError
+	var apiErr *client.APIError
+	var transport *client.TransportError
+	switch {
+	case errors.As(err, &apiErr):
+		obj["error"] = apiErr.Message
+		obj["code"] = apiErr.Code
+		obj["status"] = apiErr.Status
+	case errors.As(err, &usage) || errors.Is(err, flag.ErrHelp):
+		obj["code"] = "usage"
+	case errors.As(err, &transport):
+		obj["code"] = "unreachable"
+	}
+	return obj
+}
+
+// wantsJSON scans the raw arguments for --json. The flag lives on each
+// subcommand's flag set, but an error can happen before that set is parsed and
+// the output shape has to be decided either way.
+func wantsJSON(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "-json", "--json", "-json=true", "--json=true":
+			return true
+		case "--":
+			return false
+		}
+	}
+	return false
 }
 
 func splitCSV(s string) []string {

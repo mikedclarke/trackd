@@ -173,7 +173,7 @@ func (s *Store) importLinearRows(tx *sql.Tx, rows []linearRow, actor string, sta
 		usedSlugs[slug] = true
 		ts := now()
 		res, err := tx.Exec(
-			"INSERT INTO projects (name, slug, description, status, created_at, updated_at) VALUES (?, ?, '', 'active', ?, ?)",
+			"INSERT INTO projects (name, slug, description, status, created_at, updated_at) VALUES (?, ?, '', 'planned', ?, ?)",
 			row.project, slug, ts, ts,
 		)
 		if err != nil {
@@ -258,7 +258,7 @@ func (s *Store) importLinearRows(tx *sql.Tx, rows []linearRow, actor string, sta
 			return err
 		}
 		issueIDs[row.key] = id
-		for _, name := range normalizeLabels(row.labels) {
+		for _, name := range dedupeLabelNames(row.labels) {
 			labelID, err := ensureLabel(tx, name)
 			if err != nil {
 				return err

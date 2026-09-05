@@ -191,6 +191,7 @@ main { padding: 16px 20px 40px; }
 .meta dt { color: var(--dim); }
 .meta dd a { color: var(--unstarted); }
 .meta dd a:hover { color: var(--accent); }
+.meta .dates { color: var(--dim); }
 .description {
   font-family: var(--sans);
   font-size: 14px;

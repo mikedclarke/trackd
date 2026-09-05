@@ -5,3 +5,4 @@
 *.jsonl
 dist/
 .DS_Store
+/bin/

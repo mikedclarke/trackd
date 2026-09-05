@@ -8,19 +8,40 @@ import (
 	"strings"
 )
 
-func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, error) {
+var priorityLabels = []string{"No priority", "Urgent", "High", "Medium", "Low"}
+
+// CreateIssue inserts an issue and returns it. created is false when the input
+// carried an idempotency key that has already been used: the original issue
+// comes back untouched and no event is recorded.
+func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, bool, error) {
 	if strings.TrimSpace(in.Title) == "" {
-		return nil, errors.New("issue title is required")
+		return nil, false, errors.New("issue title is required")
 	}
 	if in.Priority < 0 || in.Priority > 4 {
-		return nil, fmt.Errorf("priority %d out of range 0-4", in.Priority)
+		return nil, false, fmt.Errorf("priority %d out of range 0-4", in.Priority)
+	}
+	if err := validDate(in.DueDate); err != nil {
+		return nil, false, fmt.Errorf("due date: %w", err)
 	}
 	statusName := in.Status
 	if statusName == "" {
 		statusName = "Triage"
 	}
 	var out *Issue
+	created := true
 	err := s.tx(func(tx *sql.Tx) error {
+		if in.IdempotencyKey != "" {
+			var existing string
+			err := tx.QueryRow("SELECT key FROM issues WHERE idempotency_key = ?", in.IdempotencyKey).Scan(&existing)
+			if err == nil {
+				created = false
+				out, err = loadIssue(tx, existing)
+				return err
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		st, err := statusByName(tx, statusName)
 		if err != nil {
 			return err
@@ -41,11 +62,26 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, error) {
 		if err != nil {
 			return err
 		}
+		labels, err := normalizeLabels(tx, nil, &in.Labels, nil, nil)
+		if err != nil {
+			return err
+		}
 		ts := now()
+		// An issue born into a phase carries that phase's timestamp, the same
+		// as one that reached it through an update.
+		var startedAt, completedAt, canceledAt any
+		switch st.Type {
+		case "started":
+			startedAt = ts
+		case "completed":
+			completedAt = ts
+		case "canceled":
+			canceledAt = ts
+		}
 		res, err := tx.Exec(`
-			INSERT INTO issues (key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			key, in.Title, in.Description, st.ID, in.Priority, projectID, parentID, in.Assignee, milestoneID, nullable(in.DueDate), ts, ts,
+			INSERT INTO issues (key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, idempotency_key)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			key, in.Title, in.Description, st.ID, in.Priority, projectID, parentID, in.Assignee, milestoneID, nullable(in.DueDate), ts, ts, startedAt, completedAt, canceledAt, nullable(in.IdempotencyKey),
 		)
 		if err != nil {
 			return err
@@ -54,7 +90,7 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, error) {
 		if err != nil {
 			return err
 		}
-		if err := setIssueLabels(tx, id, in.Labels); err != nil {
+		if err := applyIssueLabels(tx, id, labels); err != nil {
 			return err
 		}
 		out, err = loadIssue(tx, key)
@@ -63,7 +99,10 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, error) {
 		}
 		return recordEvent(tx, "issue", id, actor, "issue.created", nil, out)
 	})
-	return out, err
+	if err != nil {
+		return nil, false, err
+	}
+	return out, created, nil
 }
 
 func (s *Store) GetIssue(key string) (*Issue, error) {
@@ -80,13 +119,24 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 	if p.Priority != nil && (*p.Priority < 0 || *p.Priority > 4) {
 		return nil, fmt.Errorf("priority %d out of range 0-4", *p.Priority)
 	}
+	if p.Labels != nil && (len(p.AddLabels) > 0 || len(p.RemoveLabels) > 0) {
+		return nil, errors.New("labels cannot be combined with add_labels or remove_labels")
+	}
+	if p.DueDate != nil {
+		if err := validDate(*p.DueDate); err != nil {
+			return nil, fmt.Errorf("due date: %w", err)
+		}
+	}
 	var out *Issue
 	err := s.tx(func(tx *sql.Tx) error {
 		before, err := loadIssue(tx, key)
 		if err != nil {
 			return err
 		}
-		sets := []string{"updated_at = ?"}
+		if p.ExpectedVersion != nil && *p.ExpectedVersion != before.Version {
+			return fmt.Errorf("issue %s is at version %d, not %d: %w", before.Key, before.Version, *p.ExpectedVersion, ErrVersionConflict)
+		}
+		sets := []string{"updated_at = ?", "version = version + 1"}
 		args := []any{now()}
 		if p.Title != nil {
 			if strings.TrimSpace(*p.Title) == "" {
@@ -95,27 +145,40 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 			sets, args = append(sets, "title = ?"), append(args, *p.Title)
 		}
 		if p.Description != nil {
+			// Descriptions are append-only unless the caller says otherwise:
+			// an agent overwriting another agent's handoff notes is the loss
+			// this guards against.
+			if before.Description != "" && !p.ReplaceDescription {
+				return fmt.Errorf("issue %s: %w", before.Key, ErrDescriptionReplace)
+			}
 			sets, args = append(sets, "description = ?"), append(args, *p.Description)
 		}
 		if p.Priority != nil {
 			sets, args = append(sets, "priority = ?"), append(args, *p.Priority)
 		}
-		if p.Status != nil && *p.Status != before.Status {
+		if p.Status != nil && !strings.EqualFold(*p.Status, before.Status) {
 			st, err := statusByName(tx, *p.Status)
 			if err != nil {
 				return err
 			}
 			sets, args = append(sets, "status_id = ?"), append(args, st.ID)
-			// First transition into each phase stamps its timestamp; later
-			// moves never overwrite it.
 			ts := now()
-			switch {
-			case st.Type == "started" && before.StartedAt == "":
+			// started_at is sticky; completed_at and canceled_at follow the
+			// status, so reopening an issue clears the one it left behind.
+			if st.Type == "started" && before.StartedAt == "" {
 				sets, args = append(sets, "started_at = ?"), append(args, ts)
+			}
+			switch {
 			case st.Type == "completed" && before.CompletedAt == "":
 				sets, args = append(sets, "completed_at = ?"), append(args, ts)
+			case st.Type != "completed" && before.CompletedAt != "":
+				sets = append(sets, "completed_at = NULL")
+			}
+			switch {
 			case st.Type == "canceled" && before.CanceledAt == "":
 				sets, args = append(sets, "canceled_at = ?"), append(args, ts)
+			case st.Type != "canceled" && before.CanceledAt != "":
+				sets = append(sets, "canceled_at = NULL")
 			}
 		}
 		if p.Project != nil {
@@ -145,10 +208,7 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 			sets, args = append(sets, "milestone_id = ?"), append(args, milestoneID)
 		}
 		if p.Parent != nil {
-			if *p.Parent == key {
-				return errors.New("issue cannot be its own parent")
-			}
-			parentID, err := optionalIssueID(tx, *p.Parent)
+			parentID, err := parentIssueID(tx, before, *p.Parent)
 			if err != nil {
 				return err
 			}
@@ -166,14 +226,49 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 				sets = append(sets, "archived_at = NULL")
 			}
 		}
+		if p.Labels != nil || len(p.AddLabels) > 0 || len(p.RemoveLabels) > 0 {
+			labels, err := normalizeLabels(tx, before.Labels, p.Labels, p.AddLabels, p.RemoveLabels)
+			if err != nil {
+				return err
+			}
+			if err := applyIssueLabels(tx, before.ID, labels); err != nil {
+				return err
+			}
+		}
 		args = append(args, before.ID)
 		if _, err := tx.Exec("UPDATE issues SET "+strings.Join(sets, ", ")+" WHERE id = ?", args...); err != nil {
 			return err
 		}
-		if p.Labels != nil {
-			if err := setIssueLabels(tx, before.ID, *p.Labels); err != nil {
-				return err
-			}
+		out, err = loadIssue(tx, key)
+		if err != nil {
+			return err
+		}
+		return recordEvent(tx, "issue", before.ID, actor, "issue.updated", before, out)
+	})
+	return out, err
+}
+
+// AppendDescription adds text to the end of an issue's description, the safe
+// way for one agent to add to another's notes.
+func (s *Store) AppendDescription(key, text, actor string) (*Issue, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("append text is required")
+	}
+	var out *Issue
+	err := s.tx(func(tx *sql.Tx) error {
+		before, err := loadIssue(tx, key)
+		if err != nil {
+			return err
+		}
+		description := text
+		if before.Description != "" {
+			description = before.Description + "\n\n" + text
+		}
+		if _, err := tx.Exec(
+			"UPDATE issues SET description = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+			description, now(), before.ID,
+		); err != nil {
+			return err
 		}
 		out, err = loadIssue(tx, key)
 		if err != nil {
@@ -187,49 +282,80 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 	where := []string{"1=1"}
 	var args []any
-	if !f.IncludeArchived {
+	switch strings.ToLower(f.Archived) {
+	case "", "false":
 		where = append(where, "i.archived_at IS NULL")
+	case "true":
+	case "only":
+		where = append(where, "i.archived_at IS NOT NULL")
+	default:
+		return nil, fmt.Errorf("unknown archived filter %q, want \"\", \"true\" or \"only\"", f.Archived)
 	}
-	if f.Status != "" {
-		where, args = append(where, "s.name = ?"), append(args, f.Status)
+	if len(f.Statuses) > 0 {
+		where = append(where, "s.name COLLATE NOCASE IN ("+placeholders(len(f.Statuses))+")")
+		for _, v := range f.Statuses {
+			args = append(args, v)
+		}
 	}
-	if f.StatusType != "" {
-		where, args = append(where, "s.type = ?"), append(args, f.StatusType)
+	if len(f.StatusTypes) > 0 {
+		where = append(where, "s.type COLLATE NOCASE IN ("+placeholders(len(f.StatusTypes))+")")
+		for _, v := range f.StatusTypes {
+			args = append(args, v)
+		}
 	}
 	if f.Project != "" {
-		where, args = append(where, "p.slug = ?"), append(args, f.Project)
+		where, args = append(where, "p.slug = ? COLLATE NOCASE"), append(args, f.Project)
 	}
 	if f.Parent != "" {
-		where, args = append(where, "pi.key = ?"), append(args, f.Parent)
+		where, args = append(where, "pi.key = ? COLLATE NOCASE"), append(args, f.Parent)
 	}
 	if f.Assignee != "" {
-		where, args = append(where, "i.assignee = ?"), append(args, f.Assignee)
+		where, args = append(where, "i.assignee = ? COLLATE NOCASE"), append(args, f.Assignee)
 	}
 	if f.Milestone != "" {
-		where, args = append(where, "m.name = ?"), append(args, f.Milestone)
+		where, args = append(where, "m.name = ? COLLATE NOCASE"), append(args, f.Milestone)
 	}
-	if f.Label != "" {
+	for _, label := range f.Labels {
 		where = append(where, "EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id AND l.name = ?)")
-		args = append(args, f.Label)
+		args = append(args, label)
+	}
+	for _, label := range f.ExcludeLabels {
+		where = append(where, "NOT EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id AND l.name = ?)")
+		args = append(args, label)
 	}
 	if f.Query != "" {
-		where = append(where, "(i.title LIKE ? OR i.description LIKE ? OR i.key LIKE ?)")
-		q := "%" + f.Query + "%"
-		args = append(args, q, q, q)
+		where = append(where, `(i.title LIKE ? ESCAPE '\' OR i.description LIKE ? ESCAPE '\' OR i.key LIKE ? ESCAPE '\'`+
+			` OR EXISTS (SELECT 1 FROM comments c WHERE c.issue_id = i.id AND c.body LIKE ? ESCAPE '\'))`)
+		q := "%" + escapeLike(f.Query) + "%"
+		args = append(args, q, q, q, q)
 	}
 	if f.UpdatedSince != "" {
 		where, args = append(where, "i.updated_at >= ?"), append(args, f.UpdatedSince)
+	}
+	if f.CompletedSince != "" {
+		where, args = append(where, "i.completed_at >= ?"), append(args, f.CompletedSince)
+	}
+	order, err := issueOrder(f.OrderBy)
+	if err != nil {
+		return nil, err
 	}
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 100
 	}
+	if limit > 500 {
+		limit = 500
+	}
 	args = append(args, limit, f.Offset)
 
-	var out []Issue
-	err := s.tx(func(tx *sql.Tx) error {
+	out := []Issue{}
+	err = s.tx(func(tx *sql.Tx) error {
+		base, err := settingTx(tx, "base_url")
+		if err != nil {
+			return err
+		}
 		rows, err := tx.Query(issueSelect+" WHERE "+strings.Join(where, " AND ")+
-			" ORDER BY i.updated_at DESC, i.id DESC LIMIT ? OFFSET ?", args...)
+			" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
 		if err != nil {
 			return err
 		}
@@ -239,14 +365,25 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 			if err != nil {
 				return err
 			}
+			decorateIssue(issue, base)
 			out = append(out, *issue)
 		}
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		ids := make([]int64, len(out))
 		for i := range out {
-			if out[i].Labels, err = issueLabels(tx, out[i].ID); err != nil {
-				return err
+			ids[i] = out[i].ID
+		}
+		labels, err := issueLabelsFor(tx, ids)
+		if err != nil {
+			return err
+		}
+		for i := range out {
+			if names, ok := labels[out[i].ID]; ok {
+				out[i].Labels = names
+			} else {
+				out[i].Labels = []string{}
 			}
 		}
 		return nil
@@ -254,20 +391,67 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 	return out, err
 }
 
-func (s *Store) AddComment(issueKey, body, actor string) (*Comment, error) {
-	if strings.TrimSpace(body) == "" {
-		return nil, errors.New("comment body is required")
+func issueOrder(orderBy string) (string, error) {
+	switch orderBy {
+	case "", "updated":
+		return "i.updated_at DESC, i.id DESC", nil
+	case "created":
+		return "i.created_at ASC, i.id ASC", nil
+	case "priority":
+		// Priority 0 means "no priority", which belongs last, not first.
+		return "CASE i.priority WHEN 0 THEN 5 ELSE i.priority END ASC, i.created_at ASC", nil
+	default:
+		return "", fmt.Errorf("unknown order_by %q, want updated, created or priority", orderBy)
+	}
+}
+
+// escapeLike neutralises the LIKE wildcards in a user's search string; the
+// queries pair it with ESCAPE '\'.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// AddComment appends a comment. created is false when the idempotency key has
+// already been used, in which case the original comment comes back.
+func (s *Store) AddComment(issueKey string, in CommentInput, actor string) (*Comment, bool, error) {
+	if strings.TrimSpace(in.Body) == "" {
+		return nil, false, errors.New("comment body is required")
 	}
 	var out *Comment
+	created := true
 	err := s.tx(func(tx *sql.Tx) error {
+		if in.IdempotencyKey != "" {
+			var id int64
+			err := tx.QueryRow("SELECT id FROM comments WHERE idempotency_key = ?", in.IdempotencyKey).Scan(&id)
+			if err == nil {
+				created = false
+				out, err = loadComment(tx, id)
+				return err
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		issue, err := loadIssue(tx, issueKey)
 		if err != nil {
 			return err
 		}
+		var parentID any
+		if in.ParentID != 0 {
+			var owner int64
+			err := tx.QueryRow("SELECT issue_id FROM comments WHERE id = ?", in.ParentID).Scan(&owner)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != issue.ID) {
+				return fmt.Errorf("comment %d is not on issue %s: %w", in.ParentID, issue.Key, ErrInvalidRef)
+			}
+			if err != nil {
+				return err
+			}
+			parentID = in.ParentID
+		}
 		ts := now()
 		res, err := tx.Exec(
-			"INSERT INTO comments (issue_id, body, actor, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-			issue.ID, body, actor, ts, ts,
+			"INSERT INTO comments (issue_id, body, actor, parent_id, created_at, updated_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			issue.ID, in.Body, actor, parentID, ts, ts, nullable(in.IdempotencyKey),
 		)
 		if err != nil {
 			return err
@@ -276,8 +460,49 @@ func (s *Store) AddComment(issueKey, body, actor string) (*Comment, error) {
 		if err != nil {
 			return err
 		}
-		out = &Comment{ID: id, IssueKey: issue.Key, Body: body, Actor: actor, CreatedAt: ts, UpdatedAt: ts}
+		// A comment is activity on the issue even though it does not change
+		// the issue row's own fields, so it moves updated_at but not version.
+		if err := touchIssue(tx, issue.ID, ts); err != nil {
+			return err
+		}
+		out, err = loadComment(tx, id)
+		if err != nil {
+			return err
+		}
 		return recordEvent(tx, "issue", issue.ID, actor, "comment.created", nil, out)
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return out, created, nil
+}
+
+func (s *Store) UpdateComment(id int64, body, actor string) (*Comment, error) {
+	if strings.TrimSpace(body) == "" {
+		return nil, errors.New("comment body is required")
+	}
+	var out *Comment
+	err := s.tx(func(tx *sql.Tx) error {
+		before, err := loadComment(tx, id)
+		if err != nil {
+			return err
+		}
+		ts := now()
+		if _, err := tx.Exec("UPDATE comments SET body = ?, updated_at = ? WHERE id = ?", body, ts, id); err != nil {
+			return err
+		}
+		issue, err := loadIssue(tx, before.IssueKey)
+		if err != nil {
+			return err
+		}
+		if err := touchIssue(tx, issue.ID, ts); err != nil {
+			return err
+		}
+		out, err = loadComment(tx, id)
+		if err != nil {
+			return err
+		}
+		return recordEvent(tx, "issue", issue.ID, actor, "comment.updated", before, out)
 	})
 	return out, err
 }
@@ -290,7 +515,7 @@ func (s *Store) ListComments(issueKey string) ([]Comment, error) {
 			return err
 		}
 		rows, err := tx.Query(
-			"SELECT id, body, actor, created_at, updated_at FROM comments WHERE issue_id = ? ORDER BY id",
+			"SELECT id, body, actor, COALESCE(parent_id, 0), created_at, updated_at FROM comments WHERE issue_id = ? ORDER BY id",
 			issue.ID,
 		)
 		if err != nil {
@@ -299,7 +524,7 @@ func (s *Store) ListComments(issueKey string) ([]Comment, error) {
 		defer rows.Close()
 		for rows.Next() {
 			c := Comment{IssueKey: issue.Key}
-			if err := rows.Scan(&c.ID, &c.Body, &c.Actor, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			if err := rows.Scan(&c.ID, &c.Body, &c.Actor, &c.ParentID, &c.CreatedAt, &c.UpdatedAt); err != nil {
 				return err
 			}
 			out = append(out, c)
@@ -307,6 +532,27 @@ func (s *Store) ListComments(issueKey string) ([]Comment, error) {
 		return rows.Err()
 	})
 	return out, err
+}
+
+func loadComment(tx *sql.Tx, id int64) (*Comment, error) {
+	var c Comment
+	err := tx.QueryRow(`
+		SELECT c.id, i.key, c.body, c.actor, COALESCE(c.parent_id, 0), c.created_at, c.updated_at
+		FROM comments c JOIN issues i ON i.id = c.issue_id
+		WHERE c.id = ?`, id,
+	).Scan(&c.ID, &c.IssueKey, &c.Body, &c.Actor, &c.ParentID, &c.CreatedAt, &c.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("comment %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func touchIssue(tx *sql.Tx, issueID int64, ts string) error {
+	_, err := tx.Exec("UPDATE issues SET updated_at = ? WHERE id = ?", ts, issueID)
+	return err
 }
 
 var relationTypes = map[string]bool{"blocks": true, "relates": true, "duplicate": true}
@@ -337,6 +583,13 @@ func (s *Store) AddRelation(issueKey, relatedKey, typ, actor string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return nil
 		}
+		ts := now()
+		if err := touchIssue(tx, issue.ID, ts); err != nil {
+			return err
+		}
+		if err := touchIssue(tx, related.ID, ts); err != nil {
+			return err
+		}
 		rel := Relation{IssueKey: issue.Key, RelatedKey: related.Key, Type: typ}
 		return recordEvent(tx, "issue", issue.ID, actor, "relation.added", nil, rel)
 	})
@@ -361,6 +614,13 @@ func (s *Store) RemoveRelation(issueKey, relatedKey, typ, actor string) error {
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("relation %s %s %s: %w", issueKey, typ, relatedKey, ErrNotFound)
+		}
+		ts := now()
+		if err := touchIssue(tx, issue.ID, ts); err != nil {
+			return err
+		}
+		if err := touchIssue(tx, related.ID, ts); err != nil {
+			return err
 		}
 		rel := Relation{IssueKey: issue.Key, RelatedKey: related.Key, Type: typ}
 		return recordEvent(tx, "issue", issue.ID, actor, "relation.removed", rel, nil)
@@ -437,7 +697,7 @@ func (s *Store) ListStatuses() ([]Status, error) {
 const issueSelect = `
 	SELECT i.id, i.key, i.title, i.description, s.name, s.type, i.priority,
 	       COALESCE(p.slug, ''), COALESCE(pi.key, ''), i.assignee, COALESCE(m.name, ''),
-	       COALESCE(i.due_date, ''),
+	       COALESCE(i.due_date, ''), i.version,
 	       i.created_at, i.updated_at,
 	       COALESCE(i.started_at, ''), COALESCE(i.completed_at, ''),
 	       COALESCE(i.canceled_at, ''), COALESCE(i.archived_at, '')
@@ -453,7 +713,7 @@ func scanIssue(r rowScanner) (*Issue, error) {
 	var i Issue
 	err := r.Scan(
 		&i.ID, &i.Key, &i.Title, &i.Description, &i.Status, &i.StatusType, &i.Priority,
-		&i.Project, &i.Parent, &i.Assignee, &i.Milestone, &i.DueDate,
+		&i.Project, &i.Parent, &i.Assignee, &i.Milestone, &i.DueDate, &i.Version,
 		&i.CreatedAt, &i.UpdatedAt,
 		&i.StartedAt, &i.CompletedAt, &i.CanceledAt, &i.ArchivedAt,
 	)
@@ -461,6 +721,16 @@ func scanIssue(r rowScanner) (*Issue, error) {
 		return nil, err
 	}
 	return &i, nil
+}
+
+// decorateIssue fills the fields derived at read time rather than stored.
+func decorateIssue(i *Issue, baseURL string) {
+	if i.Priority >= 0 && i.Priority < len(priorityLabels) {
+		i.PriorityLabel = priorityLabels[i.Priority]
+	}
+	if baseURL != "" {
+		i.URL = strings.TrimRight(baseURL, "/") + "/ui/issue/" + i.Key
+	}
 }
 
 func loadIssue(tx *sql.Tx, key string) (*Issue, error) {
@@ -474,15 +744,20 @@ func loadIssue(tx *sql.Tx, key string) (*Issue, error) {
 	if issue.Labels, err = issueLabels(tx, issue.ID); err != nil {
 		return nil, err
 	}
+	base, err := settingTx(tx, "base_url")
+	if err != nil {
+		return nil, err
+	}
+	decorateIssue(issue, base)
 	return issue, nil
 }
 
 func statusByName(tx *sql.Tx, name string) (*Status, error) {
 	var st Status
-	err := tx.QueryRow("SELECT id, name, type, position FROM statuses WHERE name = ?", name).
+	err := tx.QueryRow("SELECT id, name, type, position FROM statuses WHERE name = ? COLLATE NOCASE", name).
 		Scan(&st.ID, &st.Name, &st.Type, &st.Position)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("status %q: %w", name, ErrNotFound)
+		return nil, fmt.Errorf("status %q: %w", name, ErrInvalidRef)
 	}
 	if err != nil {
 		return nil, err
@@ -515,9 +790,9 @@ func optionalProjectID(tx *sql.Tx, slug string) (any, error) {
 		return nil, nil
 	}
 	var id int64
-	err := tx.QueryRow("SELECT id FROM projects WHERE slug = ?", slug).Scan(&id)
+	err := tx.QueryRow("SELECT id FROM projects WHERE slug = ? COLLATE NOCASE", slug).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("project %s: %w", slug, ErrNotFound)
+		return nil, fmt.Errorf("project %s: %w", slug, ErrInvalidRef)
 	}
 	if err != nil {
 		return nil, err
@@ -529,13 +804,53 @@ func optionalIssueID(tx *sql.Tx, key string) (any, error) {
 	if key == "" {
 		return nil, nil
 	}
-	var id int64
-	err := tx.QueryRow("SELECT id FROM issues WHERE key = ?", key).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("issue %s: %w", key, ErrNotFound)
-	}
+	id, err := issueIDByKey(tx, key)
 	if err != nil {
 		return nil, err
 	}
 	return id, nil
+}
+
+func issueIDByKey(tx *sql.Tx, key string) (int64, error) {
+	var id int64
+	err := tx.QueryRow("SELECT id FROM issues WHERE key = ?", key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("issue %s: %w", key, ErrInvalidRef)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// parentIssueID resolves a patch's parent key and refuses anything that would
+// make the hierarchy a loop.
+func parentIssueID(tx *sql.Tx, issue *Issue, parentKey string) (any, error) {
+	if parentKey == "" {
+		return nil, nil
+	}
+	if parentKey == issue.Key {
+		return nil, fmt.Errorf("issue %s cannot be its own parent: %w", issue.Key, ErrInvalidRef)
+	}
+	parentID, err := issueIDByKey(tx, parentKey)
+	if err != nil {
+		return nil, err
+	}
+	// Walk up from the proposed parent: reaching this issue means the edge
+	// would close a cycle. The depth cap stops a pre-existing loop spinning.
+	id := parentID
+	for depth := 0; depth < 1000; depth++ {
+		if id == issue.ID {
+			return nil, fmt.Errorf("issue %s is already above %s: %w", issue.Key, parentKey, ErrInvalidRef)
+		}
+		var next sql.NullInt64
+		if err := tx.QueryRow("SELECT parent_id FROM issues WHERE id = ?", id).Scan(&next); err != nil {
+			return nil, err
+		}
+		if !next.Valid {
+			return parentID, nil
+		}
+		id = next.Int64
+	}
+	return nil, fmt.Errorf("parent chain above %s is too deep: %w", parentKey, ErrInvalidRef)
 }

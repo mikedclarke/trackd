@@ -28,6 +28,13 @@ func TestImportLinearCSV(t *testing.T) {
 	if stats.Milestones != 1 || stats.Assignees != 1 {
 		t.Errorf("milestones = %d, assignees = %d, want 1 and 1", stats.Milestones, stats.Assignees)
 	}
+	project, err := s.GetProject("site-rebuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Status != "planned" {
+		t.Errorf("imported project status = %q, want planned", project.Status)
+	}
 	imported, err := s.GetIssue("GDL-1")
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +101,7 @@ func TestImportLinearCSV(t *testing.T) {
 	}
 
 	// The key sequence continues after the dominant prefix's maximum.
-	next, err := s.CreateIssue(IssueInput{Title: "post-import"}, "")
+	next, _, err := s.CreateIssue(IssueInput{Title: "post-import"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +124,7 @@ func TestImportLinearDryRun(t *testing.T) {
 	if stats.Issues != 5 {
 		t.Errorf("dry-run stats = %+v", stats)
 	}
-	issues, err := s.ListIssues(IssueFilter{IncludeArchived: true})
+	issues, err := s.ListIssues(IssueFilter{Archived: "true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +143,7 @@ func TestImportLinearRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "missing column") {
 		t.Errorf("bad header error = %v", err)
 	}
-	if _, err := s.CreateIssue(IssueInput{Title: "existing"}, ""); err != nil {
+	if _, _, err := s.CreateIssue(IssueInput{Title: "existing"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ImportLinearCSV(strings.NewReader(linearFixture), "", false); err == nil {
