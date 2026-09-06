@@ -78,6 +78,10 @@ func run(args []string) error {
 	case "import":
 		return cmdImport(rest)
 	case "help", "-h", "--help":
+		// "trackd help issue update" is "trackd issue update --help".
+		if len(rest) > 0 {
+			return run(append(rest, "--help"))
+		}
 		usage()
 		return nil
 	default:
@@ -196,8 +200,8 @@ func cmdServe(args []string) error {
 }
 
 func cmdToken(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd token <add|list|revoke> [flags]")
+	if done, err := groupUsage(args, "usage: trackd token <add|list|revoke> [flags]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("token "+sub, flag.ContinueOnError)
@@ -449,8 +453,8 @@ The database path defaults to $TRACKD_DB, then ./trackd.db.
 // read-only; a write takes the exclusive lock like every other server command
 // that changes the database, so stop the server first.
 func cmdSetting(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd setting <list|get|set> [--db <path>] [--json] [key] [value]")
+	if done, err := groupUsage(args, "usage: trackd setting <list|get|set> [--db <path>] [--json] [key] [value]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("setting "+sub, flag.ContinueOnError)

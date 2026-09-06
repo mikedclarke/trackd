@@ -58,6 +58,22 @@ func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
 }
 
+// groupUsage handles a command group (issue, project, token, ...) called with
+// no subcommand or with a help request. Help prints the usage line and
+// succeeds; no subcommand at all is a usage error. Each subcommand answers
+// --help itself with its flag list.
+func groupUsage(args []string, line string) (handled bool, err error) {
+	if len(args) == 0 {
+		return true, usagef(line)
+	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		fmt.Println(line)
+		return true, nil
+	}
+	return false, nil
+}
+
 func printJSON(v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -200,8 +216,8 @@ func clearFlag(fs *flag.FlagSet, name, what string) *bool {
 func strp(s string) *string { return &s }
 
 func cmdIssue(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd issue <list|show|create|update|append|comment|relate|events> [flags]")
+	if done, err := groupUsage(args, "usage: trackd issue <list|show|create|update|append|comment|relate|events> [flags]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -594,8 +610,8 @@ func issueComment(args []string) error {
 }
 
 func cmdComment(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd comment edit <id> --body <text> [flags]")
+	if done, err := groupUsage(args, "usage: trackd comment edit <id> --body <text> [flags]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	if sub != "edit" {
@@ -722,8 +738,8 @@ func printEvents(events []store.Event, withEntity bool) error {
 }
 
 func cmdProject(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd project <list|show|create|update> [flags]")
+	if done, err := groupUsage(args, "usage: trackd project <list|show|create|update> [flags]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -916,8 +932,8 @@ func projectUpdate(args []string) error {
 }
 
 func cmdLabel(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd label <list|add> [flags]")
+	if done, err := groupUsage(args, "usage: trackd label <list|add> [flags]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -963,8 +979,8 @@ func cmdLabel(args []string) error {
 }
 
 func cmdMilestone(args []string) error {
-	if len(args) == 0 {
-		return usagef("usage: trackd milestone <list|create|update> [flags]")
+	if done, err := groupUsage(args, "usage: trackd milestone <list|create|update> [flags]"); done {
+		return err
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {

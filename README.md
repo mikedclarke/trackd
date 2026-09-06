@@ -156,107 +156,15 @@ Open the same URL in a browser for the read-only board (sign in with a token).
 
 ### REST
 
-Issues: `GET/POST /api/v1/issues`, `GET/PATCH /api/v1/issues/{key}`,
-`POST /api/v1/issues/{key}/description` (append), comments, relations and
-per-issue events under the issue path, `PATCH /api/v1/comments/{id}`.
-Everything else: `GET /api/v1/events` (the global feed),
-`GET/POST /api/v1/projects`, `GET/PATCH /api/v1/projects/{slug}`,
-`GET/POST /api/v1/milestones`, `GET/PATCH /api/v1/milestones/{id}`,
-per-entity event feeds under projects and milestones,
-`GET/POST /api/v1/labels`, `GET /api/v1/statuses`.
-
-Issue list filters: `status`, `status_type`, `label` and `exclude_label` (all
-repeatable), `project`, `parent`, `assignee`, `milestone`, `q`, `updated_since`,
-`completed_since`, `archived` (`true` includes archived issues, `only` restricts
-to them), `order_by` (`updated`, `created`, `priority`), `limit` (default 100,
-max 500), `offset`. An unknown parameter is a 400. A filter value that names
-nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
-or a project slug cannot read as "no work": `status`, `status_type`, `project`,
-`label`, `exclude_label`, `milestone` and `parent` all resolve before the query.
-Assignees are free-form names, so an unknown one is simply an empty result.
-`GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone` or
-`token` (a comment or a relation is recorded against its issue); any other value
-is a 404.
-
-Every list response is an envelope, never a bare array:
-`{"issues": [...], "next_offset": N|null}`, and `{"comments": [...]}`,
-`{"relations": [...]}`, `{"projects": [...]}` and so on for the rest.
-`GET /api/v1/events` pages with `{"events": [...], "next_after_id": N|null}`.
-
-PATCH bodies change only the fields they include. `labels` replaces the set;
-`add_labels` and `remove_labels` amend it; sending both forms in one request is a
-400. `replace_description: true` permits an overwrite and requires an `admin`
-token (clearing a description is that field with `"description": ""` beside it,
-so it is the same rule); `expected_version` guards against a lost update. There
-are no DELETE endpoints by design.
-
-Errors are always `{"error": "human message", "code": "..."}` where the code is
-one of `validation` (400), `unauthorized` (401), `forbidden` (403, a write this
-token's role may not make: replacing a description), `not_found` (404),
-`conflict`, `version_conflict` or `description_replace` (409), `invalid_ref`
-(422, a referenced or filtered status, project, milestone, parent or label does
-not resolve), `busy` (503, with `Retry-After: 1`) and `internal` (500).
-Unmatched routes and methods use the same shape.
-
-`GET /healthz` is unauthenticated and reports
-`{"status": "ok"|"degraded", "version", "schema", "backup": {...},
-"integrity": {...}}`. Status is `degraded`, and the HTTP status 503, when the
-integrity check failed, the last backup errored or is older than twice the
-configured interval, or the scheduler is off. The body carries no filesystem
-paths.
-
-`backup` reports the server's own scheduled snapshots in `--backup-dir`, and
-nothing else. A copy taken by another tool, on a schedule of its own or into
-another directory, never reaches this counter, so a stale `last_at` here means
-"the scheduler has not run", not "there is no recent backup". If an external job
-is your real backup, point it at `--backup-dir` or monitor it separately, and
-read this number as what it is: the health of the scheduler.
+Everything is under `/api/v1` with bearer auth. Issues, comments, relations, projects, milestones, labels, statuses and a global activity feed; list responses are envelopes with paging cursors; PATCH changes only the fields it includes; every error is `{"error", "code"}`; `GET /healthz` is unauthenticated. There are no DELETE endpoints by design. The full reference, filters and error codes included, is in [docs/API.md](docs/API.md).
 
 ### CLI
 
-`issue list|show|create|update|append|comment|relate|events`, `comment edit`,
-`events`, `project list|show|create|update`, `milestone list|create|update`,
-`label list|add`, `statuses`, `health` (a table of status, version, schema,
-backup age and integrity, or the raw report with `--json`). Connection via
-`--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`. Every command takes
-`--json` for machine-readable output, on failure too: the error object goes to
-stdout and the human line to stderr. Flags may come before or after the
-positional key, so `trackd issue show --json TSK-1` works.
-
-Two rules protect a field from an empty shell variable:
-
-- A bare empty string to a value flag is a usage error. Clearing is explicit:
-  `--clear-description`, `--clear-labels`, `--clear-project`, `--clear-parent`,
-  `--clear-assignee`, `--clear-milestone`, `--clear-due`.
-- `--description -`, `--body -` and `--text -` read stdin, and fail when stdin is
-  empty rather than writing nothing over something.
-
-Exit codes: 0 ok, 1 unexpected, 2 usage or validation (400, 422), 3 not found
-(404), 4 auth (401, 403), 5 conflict (409), 6 server or network (5xx, or the
-server could not be reached). A mistyped flag, like an unknown command, is a
-usage error: exit 2, `code: "usage"`. The client gives a busy server and a
-refused connection three retries with 250ms, 1s and 3s backoff, and times out a
-request after 10 seconds. A create is retried only when it carries an
-idempotency key, so a repeat can never make a duplicate.
-
-Server maintenance commands (`serve`, `token`, `setting`, `backup`, `restore`,
-`export`, `import`) operate on the database file directly. They take `--db`, or
-`$TRACKD_DB`, and fall back to `./trackd.db`.
+`trackd issue|comment|events|project|milestone|label|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 2 usage, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. Details in [docs/CLI.md](docs/CLI.md).
 
 ### MCP
 
-Streamable HTTP at `/mcp`, same bearer auth. Twelve tools: `list_issues`,
-`get_issue` (returns the issue with comments and relations), `save_issue`,
-`add_comment`, `list_projects`, `save_project`, `list_milestones`,
-`save_milestone`, `list_labels`, `list_statuses`, `save_relation`,
-`list_activity`. `save_issue` takes a required `mode` of `create` or `update`, so
-a missing key can never turn an update into a new issue, and carries the same
-`append_description`, `add_labels`, `remove_labels`, `replace_description`
-(admin tokens only, as over REST), `expected_version` and `idempotency_key`
-fields as the API. The read tools are
-annotated read-only, and nothing in the tool set is destructive.
-
-For Claude Code, add to `.mcp.json`:
+Streamable HTTP at `/mcp`, same bearer auth, twelve tools (`list_issues`, `get_issue`, `save_issue`, `add_comment`, `list_projects`, `save_project`, `list_milestones`, `save_milestone`, `list_labels`, `list_statuses`, `save_relation`, `list_activity`). Read tools are annotated read-only and nothing in the set is destructive. For Claude Code, add to `.mcp.json`:
 
 ```json
 {
@@ -346,14 +254,35 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-launchd (macOS): a `LaunchAgent` plist with
-`ProgramArguments = [trackd, serve, --db, ..., --backup-dir, ...]` and
-`KeepAlive = true`. Point `--backup-dir` at a directory that is itself synced or
-copied off the machine, but note that macOS privacy protection (TCC) blocks
-launchd-spawned processes from privacy-protected folders such as `~/Documents`
-unless you grant the binary access in System Settings, Privacy & Security.
-trackd detects a blocked backup directory and reports it in `/healthz` instead
-of hanging.
+launchd (macOS), as `~/Library/LaunchAgents/com.example.trackd.plist`, then
+`launchctl load` it:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.trackd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/trackd</string>
+    <string>serve</string>
+    <string>--db</string><string>/Users/you/trackd/trackd.db</string>
+    <string>--backup-dir</string><string>/Users/you/trackd/backups</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/you/trackd/trackd.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/trackd/trackd.log</string>
+</dict>
+</plist>
+```
+
+Point `--backup-dir` at a directory that is itself synced or copied off the
+machine, but note that macOS privacy protection (TCC) blocks launchd-spawned
+processes from privacy-protected folders such as `~/Documents` unless you grant
+the binary access in System Settings, Privacy & Security. trackd detects a
+blocked backup directory and reports it in `/healthz` instead of hanging.
 
 ## Development
 
@@ -377,6 +306,10 @@ Releases are built locally with [goreleaser](https://goreleaser.com)
 (`goreleaser release --clean` on a tag) or with the plain cross-compile loop in
 `Makefile` (`make dist`), then attached to a GitHub release by hand. There is
 no CI.
+
+## Contributing
+
+Bug reports and questions are welcome as issues. For anything beyond a small fix, open an issue first so the approach can be agreed before code is written; see [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: see [SECURITY.md](SECURITY.md).
 
 ## License
 
