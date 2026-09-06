@@ -60,7 +60,7 @@ func TestIssueLifecycle(t *testing.T) {
 
 	issue, created, err := s.CreateIssue(IssueInput{
 		Title:       "First issue",
-		Description: "Body with unicode — ✓ and\nnewlines",
+		Description: "Body with unicode café ✓ and\nnewlines",
 		Labels:      []string{"agent-ready", "b", "agent-ready"},
 	}, "pm")
 	if err != nil {
@@ -254,14 +254,14 @@ func TestCommentsAndRelations(t *testing.T) {
 
 func TestProjects(t *testing.T) {
 	s := openTestStore(t)
-	p, err := s.CreateProject(ProjectInput{Name: "Gerrards Bullion — SEO!"}, "pm")
+	p, err := s.CreateProject(ProjectInput{Name: "Acme Widgets: Launch!"}, "pm")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Slug != "gerrards-bullion-seo" {
+	if p.Slug != "acme-widgets-launch" {
 		t.Errorf("slug = %q", p.Slug)
 	}
-	if _, err := s.CreateProject(ProjectInput{Name: "Gerrards Bullion (SEO)"}, ""); err == nil {
+	if _, err := s.CreateProject(ProjectInput{Name: "Acme Widgets (Launch)"}, ""); err == nil {
 		t.Error("duplicate slug accepted")
 	}
 
@@ -324,12 +324,12 @@ func TestTokens(t *testing.T) {
 
 func TestCustomPrefix(t *testing.T) {
 	s := openTestStore(t)
-	if err := s.SetSetting("issue_prefix", "GDL"); err != nil {
+	if err := s.SetSetting("issue_prefix", "ACME"); err != nil {
 		t.Fatal(err)
 	}
 	issue := mustCreateIssue(t, s, IssueInput{Title: "x"}, "")
-	if issue.Key != "GDL-1" {
-		t.Errorf("key = %q, want GDL-1", issue.Key)
+	if issue.Key != "ACME-1" {
+		t.Errorf("key = %q, want ACME-1", issue.Key)
 	}
 }
 

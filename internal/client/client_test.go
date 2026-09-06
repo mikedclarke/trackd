@@ -46,13 +46,13 @@ func TestAuthHeaderAndListEnvelope(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		gotQuery = r.URL.RawQuery
 		writeJSON(t, w, 200, map[string]any{
-			"issues":      []map[string]any{{"key": "GDL-1", "title": "one", "version": 3}},
+			"issues":      []map[string]any{{"key": "TSK-1", "title": "one", "version": 3}},
 			"next_offset": 100,
 		})
 	})
 	issues, next, err := c.ListIssues(IssueQuery{
 		Statuses: []string{"Todo", "In Progress"},
-		Labels:   []string{"claude-ready"},
+		Labels:   []string{"ready"},
 		Archived: "only",
 		OrderBy:  "priority",
 		Limit:    100,
@@ -70,12 +70,12 @@ func TestAuthHeaderAndListEnvelope(t *testing.T) {
 	if got := q["status"]; len(got) != 2 || got[0] != "Todo" || got[1] != "In Progress" {
 		t.Errorf("status params = %v, want both statuses", got)
 	}
-	for key, want := range map[string]string{"label": "claude-ready", "archived": "only", "order_by": "priority", "limit": "100"} {
+	for key, want := range map[string]string{"label": "ready", "archived": "only", "order_by": "priority", "limit": "100"} {
 		if q.Get(key) != want {
 			t.Errorf("%s = %q, want %q", key, q.Get(key), want)
 		}
 	}
-	if len(issues) != 1 || issues[0].Key != "GDL-1" || issues[0].Version != 3 {
+	if len(issues) != 1 || issues[0].Key != "TSK-1" || issues[0].Version != 3 {
 		t.Fatalf("issues = %+v", issues)
 	}
 	if next == nil || *next != 100 {
@@ -99,18 +99,18 @@ func TestListEnvelopeEndOfResults(t *testing.T) {
 func TestEveryListIsUnwrapped(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/issues/GDL-1/comments":
+		case "/api/v1/issues/TSK-1/comments":
 			writeJSON(t, w, 200, map[string]any{"comments": []map[string]any{{"id": 7, "body": "hi", "parent_id": 3}}})
-		case "/api/v1/issues/GDL-1/relations":
-			writeJSON(t, w, 200, map[string]any{"relations": []map[string]any{{"issue_key": "GDL-1", "related_key": "GDL-2", "type": "blocks"}}})
-		case "/api/v1/issues/GDL-1/events":
+		case "/api/v1/issues/TSK-1/relations":
+			writeJSON(t, w, 200, map[string]any{"relations": []map[string]any{{"issue_key": "TSK-1", "related_key": "TSK-2", "type": "blocks"}}})
+		case "/api/v1/issues/TSK-1/events":
 			writeJSON(t, w, 200, map[string]any{"events": []map[string]any{{"id": 4, "action": "issue.created"}}})
 		case "/api/v1/projects":
 			writeJSON(t, w, 200, map[string]any{"projects": []map[string]any{{"slug": "cutover", "status": "started"}}})
 		case "/api/v1/milestones":
 			writeJSON(t, w, 200, map[string]any{"milestones": []map[string]any{{"id": 2, "name": "beta"}}})
 		case "/api/v1/labels":
-			writeJSON(t, w, 200, map[string]any{"labels": []map[string]any{{"id": 1, "name": "claude-ready"}}})
+			writeJSON(t, w, 200, map[string]any{"labels": []map[string]any{{"id": 1, "name": "ready"}}})
 		case "/api/v1/statuses":
 			writeJSON(t, w, 200, map[string]any{"statuses": []map[string]any{{"id": 3, "name": "Todo", "type": "unstarted"}}})
 		default:
@@ -118,15 +118,15 @@ func TestEveryListIsUnwrapped(t *testing.T) {
 			w.WriteHeader(500)
 		}
 	})
-	comments, err := c.ListComments("GDL-1")
+	comments, err := c.ListComments("TSK-1")
 	if err != nil || len(comments) != 1 || comments[0].ParentID != 3 {
 		t.Errorf("comments = %+v, %v", comments, err)
 	}
-	relations, err := c.ListRelations("GDL-1")
+	relations, err := c.ListRelations("TSK-1")
 	if err != nil || len(relations) != 1 || relations[0].Type != "blocks" {
 		t.Errorf("relations = %+v, %v", relations, err)
 	}
-	events, err := c.ListIssueEvents("GDL-1", 0)
+	events, err := c.ListIssueEvents("TSK-1", 0)
 	if err != nil || len(events) != 1 || events[0].Action != "issue.created" {
 		t.Errorf("events = %+v, %v", events, err)
 	}
@@ -139,7 +139,7 @@ func TestEveryListIsUnwrapped(t *testing.T) {
 		t.Errorf("milestones = %+v, %v", milestones, err)
 	}
 	labels, err := c.ListLabels()
-	if err != nil || len(labels) != 1 || labels[0].Name != "claude-ready" {
+	if err != nil || len(labels) != 1 || labels[0].Name != "ready" {
 		t.Errorf("labels = %+v, %v", labels, err)
 	}
 	statuses, err := c.ListStatuses()
@@ -153,7 +153,7 @@ func TestEventFeedCursor(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		writeJSON(t, w, 200, map[string]any{
-			"events":        []map[string]any{{"id": 11, "entity": "issue", "entity_key": "GDL-1", "action": "issue.updated"}},
+			"events":        []map[string]any{{"id": 11, "entity": "issue", "entity_key": "TSK-1", "action": "issue.updated"}},
 			"next_after_id": 11,
 		})
 	})
@@ -168,7 +168,7 @@ func TestEventFeedCursor(t *testing.T) {
 			t.Errorf("%s = %q, want %q", key, gotQuery.Get(key), want)
 		}
 	}
-	if len(events) != 1 || events[0].EntityKey != "GDL-1" {
+	if len(events) != 1 || events[0].EntityKey != "TSK-1" {
 		t.Fatalf("events = %+v", events)
 	}
 	if next == nil || *next != 11 {
@@ -185,7 +185,7 @@ func TestErrorBodyCarriesCode(t *testing.T) {
 		wantCode   string
 		wantMsg    string
 	}{
-		{"not found", 404, `{"error":"issue GDL-9 not found","code":"not_found"}`, "application/json", "not_found", "issue GDL-9 not found"},
+		{"not found", 404, `{"error":"issue TSK-9 not found","code":"not_found"}`, "application/json", "not_found", "issue TSK-9 not found"},
 		{"conflict", 409, `{"error":"description replace refused: use append or replace_description","code":"description_replace"}`, "application/json", "description_replace", "description replace refused: use append or replace_description"},
 		{"invalid ref", 422, `{"error":"unknown label \"nope\"","code":"invalid_ref"}`, "application/json", "invalid_ref", `unknown label "nope"`},
 		{"non-JSON body", 502, "<html>bad gateway</html>", "text/html", "internal", "502 Bad Gateway"},
@@ -198,7 +198,7 @@ func TestErrorBodyCarriesCode(t *testing.T) {
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
 			})
-			_, err := fast(c).GetIssue("GDL-9")
+			_, err := fast(c).GetIssue("TSK-9")
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) {
 				t.Fatalf("err = %v, want *APIError", err)
@@ -218,14 +218,14 @@ func TestRetriesServiceUnavailableThenSucceeds(t *testing.T) {
 			writeJSON(t, w, 503, map[string]any{"error": "database is busy", "code": "busy"})
 			return
 		}
-		writeJSON(t, w, 200, map[string]any{"key": "GDL-1"})
+		writeJSON(t, w, 200, map[string]any{"key": "TSK-1"})
 	})
 	start := time.Now()
-	issue, err := c.GetIssue("GDL-1")
+	issue, err := c.GetIssue("TSK-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue.Key != "GDL-1" {
+	if issue.Key != "TSK-1" {
 		t.Errorf("issue = %+v", issue)
 	}
 	if got := calls.Load(); got != 2 {
@@ -242,7 +242,7 @@ func TestGivesUpAfterFourAttempts(t *testing.T) {
 		calls.Add(1)
 		writeJSON(t, w, 503, map[string]any{"error": "database is busy", "code": "busy"})
 	})
-	_, err := fast(c).GetIssue("GDL-1")
+	_, err := fast(c).GetIssue("TSK-1")
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != 503 || apiErr.Code != "busy" {
 		t.Fatalf("err = %v, want a 503 busy APIError", err)
@@ -282,13 +282,13 @@ func TestCreateWithIdempotencyKeyIsRetried(t *testing.T) {
 		if got["idempotency_key"] != "abc123" {
 			t.Errorf("idempotency_key = %v", got["idempotency_key"])
 		}
-		writeJSON(t, w, 200, map[string]any{"key": "GDL-2"})
+		writeJSON(t, w, 200, map[string]any{"key": "TSK-2"})
 	})
 	issue, err := fast(c).CreateIssue(IssueCreate{Title: "keyed", IdempotencyKey: "abc123"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issue.Key != "GDL-2" {
+	if issue.Key != "TSK-2" {
 		t.Errorf("issue = %+v", issue)
 	}
 	if got := calls.Load(); got != 2 {
@@ -303,7 +303,7 @@ func TestAppendIsNeverRetried(t *testing.T) {
 		writeJSON(t, w, 503, map[string]any{"error": "database is busy", "code": "busy"})
 	})
 	// Repeating an append would write the text twice.
-	if _, err := fast(c).AppendDescription("GDL-1", "more", "pm"); err == nil {
+	if _, err := fast(c).AppendDescription("TSK-1", "more", "pm"); err == nil {
 		t.Fatal("want an error")
 	}
 	if got := calls.Load(); got != 1 {
@@ -316,7 +316,7 @@ func TestUnreachableServerIsATransportError(t *testing.T) {
 	addr := ts.URL
 	ts.Close() // nothing is listening now
 	c := fast(New(addr, "td_test"))
-	_, err := c.GetIssue("GDL-1")
+	_, err := c.GetIssue("TSK-1")
 	var transport *TransportError
 	if !errors.As(err, &transport) {
 		t.Fatalf("err = %v, want *TransportError", err)
@@ -334,12 +334,12 @@ func TestIssuePatchSendsContractFieldNames(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Errorf("body: %v", err)
 		}
-		writeJSON(t, w, 200, map[string]any{"key": "GDL-1", "version": 4})
+		writeJSON(t, w, 200, map[string]any{"key": "TSK-1", "version": 4})
 	})
 	version := int64(3)
 	empty := ""
 	labels := []string{"a", "b"}
-	issue, err := c.UpdateIssue("GDL-1", IssuePatch{
+	issue, err := c.UpdateIssue("TSK-1", IssuePatch{
 		Description:        &empty,
 		ReplaceDescription: true,
 		Project:            &empty,
@@ -384,22 +384,22 @@ func TestLabelAddRemoveAndAppendBodies(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Errorf("body: %v", err)
 		}
-		writeJSON(t, w, 200, map[string]any{"key": "GDL-1"})
+		writeJSON(t, w, 200, map[string]any{"key": "TSK-1"})
 	})
-	if _, err := c.UpdateIssue("GDL-1", IssuePatch{AddLabels: []string{"claude-ready"}, RemoveLabels: []string{"needs-mike"}}); err != nil {
+	if _, err := c.UpdateIssue("TSK-1", IssuePatch{AddLabels: []string{"ready"}, RemoveLabels: []string{"blocked"}}); err != nil {
 		t.Fatal(err)
 	}
-	if fmtAny(got["add_labels"]) != "[claude-ready]" || fmtAny(got["remove_labels"]) != "[needs-mike]" {
+	if fmtAny(got["add_labels"]) != "[ready]" || fmtAny(got["remove_labels"]) != "[blocked]" {
 		t.Errorf("label ops = %v / %v", got["add_labels"], got["remove_labels"])
 	}
 	if _, ok := got["labels"]; ok {
 		t.Error("labels replace was sent alongside the add and remove lists")
 	}
 
-	if _, err := c.AppendDescription("GDL-1", "another line", "pm"); err != nil {
+	if _, err := c.AppendDescription("TSK-1", "another line", "pm"); err != nil {
 		t.Fatal(err)
 	}
-	if path != "/api/v1/issues/GDL-1/description" || method != "POST" {
+	if path != "/api/v1/issues/TSK-1/description" || method != "POST" {
 		t.Errorf("append went to %s %s", method, path)
 	}
 	if got["append"] != "another line" || got["actor"] != "pm" {
@@ -415,9 +415,9 @@ func TestCommentThreadAndEdit(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Errorf("body: %v", err)
 		}
-		writeJSON(t, w, 200, map[string]any{"id": 12, "issue_key": "GDL-1", "body": "text"})
+		writeJSON(t, w, 200, map[string]any{"id": 12, "issue_key": "TSK-1", "body": "text"})
 	})
-	comment, err := c.AddComment("GDL-1", CommentCreate{Body: "a reply", ParentID: 7, Actor: "pm", IdempotencyKey: "k1"})
+	comment, err := c.AddComment("TSK-1", CommentCreate{Body: "a reply", ParentID: 7, Actor: "pm", IdempotencyKey: "k1"})
 	if err != nil {
 		t.Fatal(err)
 	}

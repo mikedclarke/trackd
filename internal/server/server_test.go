@@ -554,22 +554,25 @@ func TestReplaceDescriptionNeedsAdmin(t *testing.T) {
 
 func TestLabelOperations(t *testing.T) {
 	e := newTestEnv(t)
-	e.label("alpha", "beta", "claude-ready", "needs-mike")
+	if err := e.store.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
+		t.Fatal(err)
+	}
+	e.label("alpha", "beta", "ready", "blocked")
 	var issue store.Issue
 	e.expect("POST", "/api/v1/issues", map[string]any{"title": "labelled"}, http.StatusCreated, &issue)
 	key := "/api/v1/issues/" + issue.Key
 
-	e.expect("PATCH", key, map[string]any{"add_labels": []string{"alpha", "claude-ready"}}, http.StatusOK, &issue)
+	e.expect("PATCH", key, map[string]any{"add_labels": []string{"alpha", "ready"}}, http.StatusOK, &issue)
 	if len(issue.Labels) != 2 {
 		t.Fatalf("after add = %v", issue.Labels)
 	}
 	// The exclusive group swaps rather than accumulating.
-	e.expect("PATCH", key, map[string]any{"add_labels": []string{"needs-mike"}}, http.StatusOK, &issue)
-	if !slicesEqual(issue.Labels, []string{"alpha", "needs-mike"}) {
+	e.expect("PATCH", key, map[string]any{"add_labels": []string{"blocked"}}, http.StatusOK, &issue)
+	if !slicesEqual(issue.Labels, []string{"alpha", "blocked"}) {
 		t.Errorf("after exclusive add = %v", issue.Labels)
 	}
 	e.expect("PATCH", key, map[string]any{"remove_labels": []string{"alpha"}}, http.StatusOK, &issue)
-	if !slicesEqual(issue.Labels, []string{"needs-mike"}) {
+	if !slicesEqual(issue.Labels, []string{"blocked"}) {
 		t.Errorf("after remove = %v", issue.Labels)
 	}
 	// Case-insensitive resolution onto the stored spelling.
@@ -584,7 +587,7 @@ func TestLabelOperations(t *testing.T) {
 		"add_labels": []string{"beta"},
 	}, http.StatusBadRequest, codeValidation)
 	e.expectError("PATCH", key, map[string]any{
-		"labels": []string{"claude-ready", "needs-mike"},
+		"labels": []string{"ready", "blocked"},
 	}, http.StatusConflict, codeConflict)
 }
 

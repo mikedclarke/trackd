@@ -15,7 +15,7 @@ func populate(t *testing.T, s *Store) {
 	t.Helper()
 	if _, err := s.CreateProject(ProjectInput{
 		Name:        "Site Rebuild",
-		Description: "multi\nline — ✓",
+		Description: "multi\nline café ✓",
 		Status:      "started",
 		StartDate:   "2026-01-01",
 		TargetDate:  "2026-06-30",
@@ -31,7 +31,7 @@ func populate(t *testing.T, s *Store) {
 		t.Fatal(err)
 	}
 	a, _, err := s.CreateIssue(IssueInput{
-		Title:          "Fix header — “quotes” & unicode ✓",
+		Title:          "Fix header, “quotes” & unicode ✓",
 		Description:    "line one\nline two\t<html> {\"json\": true}",
 		Status:         "Todo",
 		Priority:       2,
@@ -212,7 +212,7 @@ func TestImportDumpV1Fixture(t *testing.T) {
 	if err := s.ImportDump(f); err != nil {
 		t.Fatalf("importing a v1 dump: %v", err)
 	}
-	issue, err := s.GetIssue("GDL-1")
+	issue, err := s.GetIssue("ACME-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestImportDumpV1Fixture(t *testing.T) {
 	if project.Status != "started" {
 		t.Errorf("v1 project status = %q, want the migrated started", project.Status)
 	}
-	comments, err := s.ListComments("GDL-1")
+	comments, err := s.ListComments("ACME-1")
 	if err != nil || len(comments) != 1 || comments[0].ParentID != 0 {
 		t.Fatalf("comments = %+v, %v", comments, err)
 	}
@@ -237,8 +237,8 @@ func TestImportDumpV1Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.Key != "GDL-3" {
-		t.Errorf("next key = %s, want GDL-3", next.Key)
+	if next.Key != "ACME-3" {
+		t.Errorf("next key = %s, want ACME-3", next.Key)
 	}
 	// The imported dump re-exports as v2.
 	var out bytes.Buffer
@@ -254,7 +254,7 @@ func TestImportDumpV1Fixture(t *testing.T) {
 func TestImportRejectsUnknownFields(t *testing.T) {
 	s := openTestStore(t)
 	dump := `{"record":"trackd","version":2,"schema":3}` + "\n" +
-		`{"record":"setting","key":"issue_prefix","value":"GDL","extra":true}` + "\n"
+		`{"record":"setting","key":"issue_prefix","value":"ACME","extra":true}` + "\n"
 	err := s.ImportDump(strings.NewReader(dump))
 	if err == nil || !strings.Contains(err.Error(), "extra") {
 		t.Fatalf("unknown field = %v, want a rejection naming it", err)

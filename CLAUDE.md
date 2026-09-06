@@ -14,12 +14,13 @@ CLI, MCP endpoint, embedded read-only web UI.
 ## Architecture
 
 - `main.go`: entry point, subcommand dispatch, server-side commands (serve,
-  token, backup, restore, export, import), exit-code mapping
+  token, setting, backup, restore, export, import), exit-code mapping
 - `cli.go`: client commands (issue, comment, events, project, milestone, label,
   statuses, health) that talk HTTP to a running server
 - `internal/store`: SQLite storage layer. Schema migrations, CRUD, audit events,
   backup/restore, JSONL export/import, Linear CSV importer, the advisory file
-  lock. All writes go through this package.
+  lock, and the operator settings (`settings.go`: the known keys and their
+  validation). All writes go through this package.
 - `internal/server`: HTTP layer. REST API and bearer auth, MCP endpoint
   (`mcp.go`), embedded zero-JS web UI (`ui.go`, templates in `ui/`), backup
   scheduler, health checker
@@ -38,9 +39,13 @@ CLI, MCP endpoint, embedded read-only web UI.
   in turn needs an `admin` token (403 `forbidden` otherwise). Keep it that way:
   it is what stops one agent erasing another's context.
 - **One writer.** `serve` holds an exclusive advisory lock on the database file.
-  Commands that only read (`export`, `backup`, `token list`) open read-only;
-  commands that write (`token add`, `token revoke`, `import`, `restore`) take the
-  lock and refuse when a server holds it.
+  Commands that only read (`export`, `backup`, `token list`, `setting list|get`)
+  open read-only; commands that write (`token add`, `token revoke`,
+  `setting set`, `import`, `restore`) take the lock and refuse when a server
+  holds it.
+- Nothing personal ships in the product or its tests: no default label names,
+  key prefixes, people or client names from the author's own setup. Fixtures
+  use neutral names (`ACME`, `ready`, `blocked`, `Alex`).
 - Pure Go, no CGO, so releases cross-compile.
 - Keep dependencies minimal; justify any new one.
 

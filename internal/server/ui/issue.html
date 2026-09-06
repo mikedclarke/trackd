@@ -11,7 +11,7 @@
   <h1>{{.Issue.Title}}</h1>
 
   <dl class="meta">
-    {{if .Issue.Project}}<div><dt>project</dt><dd><a href="/?project={{.Issue.Project}}">{{.Issue.Project}}</a>{{with .Project}}{{if or .StartDate .TargetDate}} <span class="dates">{{if .StartDate}}{{.StartDate}}{{else}}—{{end}} → {{if .TargetDate}}{{.TargetDate}}{{else}}—{{end}}</span>{{end}}{{end}}</dd></div>{{end}}
+    {{if .Issue.Project}}<div><dt>project</dt><dd><a href="/?project={{.Issue.Project}}">{{.Issue.Project}}</a>{{with .Project}}{{if or .StartDate .TargetDate}} <span class="dates">{{if .StartDate}}{{.StartDate}}{{else}}none{{end}} → {{if .TargetDate}}{{.TargetDate}}{{else}}none{{end}}</span>{{end}}{{end}}</dd></div>{{end}}
     {{if .Issue.Parent}}<div><dt>parent</dt><dd><a href="/ui/issue/{{.Issue.Parent}}">{{.Issue.Parent}}</a></dd></div>{{end}}
     {{if .Issue.Assignee}}<div><dt>assignee</dt><dd><a href="/?assignee={{.Issue.Assignee}}">{{.Issue.Assignee}}</a></dd></div>{{end}}
     {{if .Issue.Milestone}}<div><dt>milestone</dt><dd>{{.Issue.Milestone}}</dd></div>{{end}}

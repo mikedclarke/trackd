@@ -5,10 +5,10 @@ three interfaces: REST API, CLI, and MCP, plus a read-only web board for humans.
 
 ![the trackd board](docs/board.jpeg)
 
-> **Status: pre-release.** The cutover round is in: append-only descriptions,
-> label add and remove, optimistic versions, idempotent creates, a global
-> activity feed, an exclusive server lock, and read-only opens for the commands
-> that only read. Being battle-tested before the first tagged release.
+> **Status: early release.** trackd is feature-complete for its purpose and runs
+> a real multi-agent workload daily, but it is young: expect rough edges, and
+> read the [Data safety](#data-safety) section before trusting it with the only
+> copy of anything.
 
 ## Why
 
@@ -36,11 +36,29 @@ glance at the board.
   projects, labels, relations, timestamps) with a `--dry-run` mode that validates
   everything first.
 
+## Install
+
+Prebuilt binaries for macOS, Linux and Windows are on the
+[releases page](https://github.com/mikedclarke/trackd/releases): download the
+archive for your platform, unpack it, and put `trackd` on your `PATH`.
+
+With Go 1.26 or newer installed:
+
+```sh
+go install github.com/mikedclarke/trackd@latest
+```
+
+Or from a checkout:
+
+```sh
+make build                    # writes bin/trackd, or: go build -o trackd .
+make install                  # moves it to ~/.local/bin/trackd
+```
+
 ## Quickstart
 
 ```sh
-make build                    # or: go build -o trackd .
-./bin/trackd serve --db trackd.db --backup-dir backups
+trackd serve --db trackd.db --backup-dir backups
 ```
 
 The first run prints an admin API token to stderr. Store it, it is never shown
@@ -86,10 +104,12 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   whole set when that is what you want, and `--clear-labels` empties it. Labels
   must exist before they can be applied: `trackd label add <name>` (or the label
   endpoint) is the only place a label is created, so a typo cannot invent one.
-  Label groups can be exclusive: the default configuration makes `claude-ready`
-  and `needs-mike` mutually exclusive, so adding one removes the other and a
-  replacement set holding both is rejected. Label, status, project slug and
-  milestone lookups are case-insensitive.
+  Label groups can be exclusive: configure
+  `trackd setting set label_groups '[["ready","blocked"]]'` and an issue holds at
+  most one label from each group, so adding one removes the other and a
+  replacement set holding both is rejected. No groups are configured by
+  default. Label, status, project slug and milestone lookups are
+  case-insensitive.
 - **Versions make concurrent updates safe.** Every issue carries a `version` that
   increments on each write. Pass `--expected-version N` (`expected_version` in
   the API) and a write that lost the race fails with a 409 instead of quietly
@@ -124,6 +144,13 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   `actor`. Roles: `agent` (the default) or `admin`. Every write is open to both
   except one: replacing or clearing a description, which needs `admin`. Give the
   agents `agent` tokens and keep an `admin` token for yourself.
+- **Settings** live in the database and are read and written with
+  `trackd setting list|get|set`. There are three: `issue_prefix` (the key
+  prefix for new issues, `TSK` by default; existing keys keep theirs),
+  `label_groups` (the exclusive groups above) and `base_url` (the server's
+  public URL, used to fill each issue's `url` field for links in agent output).
+  `set` writes to the database file directly, so it refuses while a server is
+  running: stop the server, set, start it again.
 
 ## Interfaces
 
@@ -212,8 +239,9 @@ refused connection three retries with 250ms, 1s and 3s backoff, and times out a
 request after 10 seconds. A create is retried only when it carries an
 idempotency key, so a repeat can never make a duplicate.
 
-Server maintenance commands (`serve`, `token`, `backup`, `restore`, `export`,
-`import`) operate on the database file directly.
+Server maintenance commands (`serve`, `token`, `setting`, `backup`, `restore`,
+`export`, `import`) operate on the database file directly. They take `--db`, or
+`$TRACKD_DB`, and fall back to `./trackd.db`.
 
 ### MCP
 
@@ -249,13 +277,16 @@ status with project/label/assignee filters, and an issue page with description,
 comments, relations, and the audit trail. Sign in once with any API token.
 Read-only: agents do the writing.
 
+![an issue page](docs/issue.jpeg)
+
 ## Data safety
 
 - **One writer.** `serve` takes an exclusive advisory lock on the database file.
-  A second server, or a `token add`, `token revoke`, `import` or `restore` aimed
-  at a database a server is already serving, refuses with
-  `another trackd is running on <path>`. `export`, `backup` and `token list` open
-  the file read-only, so they are always safe to run against a live database.
+  A second server, or a `token add`, `token revoke`, `setting set`, `import` or
+  `restore` aimed at a database a server is already serving, refuses with
+  `another trackd is running on <path>`. `export`, `backup`, `token list` and
+  `setting list|get` open the file read-only, so they are always safe to run
+  against a live database.
 - **A damaged or too-new file is refused.** `serve` runs `PRAGMA quick_check`
   before opening a database read-write and refuses a file that fails it, and an
   older binary refuses a database written by a newer one rather than migrating it
@@ -340,7 +371,12 @@ than copying over the old one, which would corrupt a trackd already running from
 that path.
 
 Pure Go, no CGO (`modernc.org/sqlite`), two direct dependencies (the SQLite
-driver and the official MCP SDK).
+driver and the official MCP SDK). Needs Go 1.26 or newer to build.
+
+Releases are built locally with [goreleaser](https://goreleaser.com)
+(`goreleaser release --clean` on a tag) or with the plain cross-compile loop in
+`Makefile` (`make dist`), then attached to a GitHub release by hand. There is
+no CI.
 
 ## License
 

@@ -70,7 +70,7 @@ func TestUndefinedFlagIsAUsageError(t *testing.T) {
 		n    int
 	}{
 		{"no positional", []string{"--frobnicate", "x"}, 0},
-		{"with a key", []string{"GDL-1", "--frobnicate", "x"}, 1},
+		{"with a key", []string{"TSK-1", "--frobnicate", "x"}, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,9 +129,9 @@ func TestWantsJSON(t *testing.T) {
 	}{
 		{[]string{"issue", "list"}, false},
 		{[]string{"issue", "list", "--json"}, true},
-		{[]string{"issue", "show", "-json", "GDL-1"}, true},
+		{[]string{"issue", "show", "-json", "TSK-1"}, true},
 		{[]string{"issue", "list", "--json=true"}, true},
-		{[]string{"issue", "comment", "GDL-1", "--body", "--json"}, true}, // conservative: a shape, not a value
+		{[]string{"issue", "comment", "TSK-1", "--body", "--json"}, true}, // conservative: a shape, not a value
 		{[]string{"issue", "list", "--", "--json"}, false},
 	}
 	for _, tc := range cases {
@@ -200,7 +200,7 @@ func TestEmptyStringIsNeverAValue(t *testing.T) {
 	}
 
 	fs, _ := newSet()
-	keys, err := parseArgs(fs, []string{"GDL-1", "--project", ""}, 1, "usage")
+	keys, err := parseArgs(fs, []string{"TSK-1", "--project", ""}, 1, "usage")
 	var usage *usageError
 	if !errors.As(err, &usage) {
 		t.Fatalf("empty --project = %v (keys %v), want a usage error", err, keys)
@@ -214,21 +214,21 @@ func TestEmptyStringIsNeverAValue(t *testing.T) {
 
 	// A flag with no --clear- twin says so without inventing one.
 	fs, _ = newSet()
-	_, err = parseArgs(fs, []string{"GDL-1", "--title", ""}, 1, "usage")
+	_, err = parseArgs(fs, []string{"TSK-1", "--title", ""}, 1, "usage")
 	if err == nil || err.Error() != "--title was given an empty value" {
 		t.Errorf("empty --title = %v", err)
 	}
 
 	// The same rule applies to one element of a repeatable flag.
 	fs, _ = newSet()
-	_, err = parseArgs(fs, []string{"GDL-1", "--add-label", "seo", "--add-label", ""}, 1, "usage")
+	_, err = parseArgs(fs, []string{"TSK-1", "--add-label", "seo", "--add-label", ""}, 1, "usage")
 	if !errors.As(err, &usage) {
 		t.Errorf("empty --add-label = %v, want a usage error", err)
 	}
 
 	// Clearing is explicit and always allowed.
 	fs, _ = newSet()
-	if _, err := parseArgs(fs, []string{"GDL-1", "--clear-project"}, 1, "usage"); err != nil {
+	if _, err := parseArgs(fs, []string{"TSK-1", "--clear-project"}, 1, "usage"); err != nil {
 		t.Errorf("--clear-project = %v, want no error", err)
 	}
 }
@@ -238,9 +238,9 @@ func TestFlagsMayPrecedeThePositionalKey(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"key first", []string{"GDL-1", "--status", "Done", "--json"}},
-		{"key last", []string{"--status", "Done", "--json", "GDL-1"}},
-		{"key in the middle", []string{"--json", "GDL-1", "--status", "Done"}},
+		{"key first", []string{"TSK-1", "--status", "Done", "--json"}},
+		{"key last", []string{"--status", "Done", "--json", "TSK-1"}},
+		{"key in the middle", []string{"--json", "TSK-1", "--status", "Done"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,7 +252,7 @@ func TestFlagsMayPrecedeThePositionalKey(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(keys) != 1 || keys[0] != "GDL-1" {
+			if len(keys) != 1 || keys[0] != "TSK-1" {
 				t.Errorf("keys = %v", keys)
 			}
 			if *status != "Done" || !*jsonOut {
@@ -266,7 +266,7 @@ func TestWrongNumberOfPositionalsIsAUsageError(t *testing.T) {
 	fs := flag.NewFlagSet("issue show", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addCommon(fs)
-	for _, args := range [][]string{{}, {"GDL-1", "GDL-2"}} {
+	for _, args := range [][]string{{}, {"TSK-1", "TSK-2"}} {
 		_, err := parseArgs(fs, args, 1, "trackd issue show <key>")
 		if exitCode(err) != 2 {
 			t.Errorf("parseArgs(%v) = %v, want a usage error", args, err)

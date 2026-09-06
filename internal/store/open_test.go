@@ -266,7 +266,7 @@ func TestMigrateFromSchema2(t *testing.T) {
 	}{
 		{"PRAGMA user_version=2", nil},
 		{"INSERT INTO projects (id, name, slug, description, status, created_at, updated_at) VALUES (1, 'Site Rebuild', 'site-rebuild', 'desc', 'active', ?, ?)", []any{ts, ts}},
-		{"INSERT INTO labels (id, name, color) VALUES (1, 'claude-ready', '')", nil},
+		{"INSERT INTO labels (id, name, color) VALUES (1, 'agent-ready', '')", nil},
 		{"INSERT INTO project_labels (project_id, label_id) VALUES (1, 1)", nil},
 		{"INSERT INTO milestones (id, project_id, name, description, target_date, created_at, updated_at) VALUES (1, 1, 'Launch', '', '2026-09-01', ?, ?)", []any{ts, ts}},
 		{"INSERT INTO issues (id, key, title, description, status_id, priority, project_id, assignee, milestone_id, created_at, updated_at) VALUES (1, 'TSK-1', 'Old issue', 'body', 3, 2, 1, 'engineer', 1, ?, ?)", []any{ts, ts}},
@@ -303,7 +303,7 @@ func TestMigrateFromSchema2(t *testing.T) {
 	if project.Status != "started" {
 		t.Errorf("project status = %q, want started (was active)", project.Status)
 	}
-	if len(project.Labels) != 1 || project.Labels[0] != "claude-ready" {
+	if len(project.Labels) != 1 || project.Labels[0] != "agent-ready" {
 		t.Errorf("project labels = %v", project.Labels)
 	}
 	issue, err := s.GetIssue("TSK-1")
@@ -324,9 +324,11 @@ func TestMigrateFromSchema2(t *testing.T) {
 	if err != nil || len(milestones) != 1 || milestones[0].TargetDate != "2026-09-01" {
 		t.Fatalf("milestones = %+v, %v", milestones, err)
 	}
+	// A migrated database gets no exclusive label groups until an operator
+	// sets some.
 	groups, err := s.Setting("label_groups")
-	if err != nil || groups != `[["claude-ready","needs-mike"]]` {
-		t.Errorf("label_groups = %q, %v", groups, err)
+	if err != nil || groups != "" {
+		t.Errorf("label_groups = %q, %v, want empty", groups, err)
 	}
 	if err := s.tx(foreignKeyCheck); err != nil {
 		t.Errorf("migrated database fails foreign_key_check: %v", err)

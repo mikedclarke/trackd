@@ -55,7 +55,10 @@ func TestProjectDatesAndCompletion(t *testing.T) {
 // S13
 func TestProjectLabelsInOneTransaction(t *testing.T) {
 	s := openTestStore(t)
-	mustLabel(t, s, "client-x", "claude-ready", "needs-mike")
+	if err := s.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
+		t.Fatal(err)
+	}
+	mustLabel(t, s, "client-x", "ready", "blocked")
 	p, err := s.CreateProject(ProjectInput{Name: "Labelled", Labels: []string{"client-x"}}, "pm")
 	if err != nil {
 		t.Fatal(err)
@@ -70,22 +73,22 @@ func TestProjectLabelsInOneTransaction(t *testing.T) {
 	if _, err := s.GetProject("doomed"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("a failed create left a project behind: %v", err)
 	}
-	added, err := s.UpdateProject(p.Slug, ProjectPatch{AddLabels: []string{"claude-ready"}}, "pm")
+	added, err := s.UpdateProject(p.Slug, ProjectPatch{AddLabels: []string{"ready"}}, "pm")
 	if err != nil || len(added.Labels) != 2 {
 		t.Fatalf("add = %+v, %v", added, err)
 	}
-	swapped, err := s.UpdateProject(p.Slug, ProjectPatch{AddLabels: []string{"needs-mike"}}, "pm")
+	swapped, err := s.UpdateProject(p.Slug, ProjectPatch{AddLabels: []string{"blocked"}}, "pm")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if containsFold(swapped.Labels, "claude-ready") {
+	if containsFold(swapped.Labels, "ready") {
 		t.Errorf("exclusive group not applied to projects: %v", swapped.Labels)
 	}
-	removed, err := s.UpdateProject(p.Slug, ProjectPatch{RemoveLabels: []string{"needs-mike"}}, "pm")
+	removed, err := s.UpdateProject(p.Slug, ProjectPatch{RemoveLabels: []string{"blocked"}}, "pm")
 	if err != nil || len(removed.Labels) != 1 {
 		t.Fatalf("remove = %+v, %v", removed, err)
 	}
-	both := []string{"claude-ready", "needs-mike"}
+	both := []string{"ready", "blocked"}
 	if _, err := s.UpdateProject(p.Slug, ProjectPatch{Labels: &both}, "pm"); !errors.Is(err, ErrConflict) {
 		t.Errorf("replace with a whole exclusive group = %v, want ErrConflict", err)
 	}

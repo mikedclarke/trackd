@@ -68,5 +68,5 @@ ALTER TABLE labels_new RENAME TO labels;
 CREATE INDEX idx_events_created ON events (created_at);
 
 INSERT OR IGNORE INTO settings (key, value) VALUES
-    ('label_groups', '[["claude-ready","needs-mike"]]'),
+    ('label_groups', ''),
     ('base_url', '');

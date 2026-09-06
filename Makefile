@@ -2,7 +2,7 @@ BIN := bin/trackd
 PREFIX ?= $(HOME)/.local
 VERSION = $(shell git describe --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build test lint install clean version
+.PHONY: all build test lint install clean version dist
 
 all: build
 
@@ -47,6 +47,27 @@ install: build
 
 version:
 	@echo $(VERSION)
+
+# Release archives for every supported platform, plus a checksum file, in
+# dist/. Same rules as build: the tree must be clean so the version is real.
+dist:
+	@v="$(VERSION)"; \
+	case "$$v" in *-dirty) \
+	  if [ "$(ALLOW_DIRTY)" != "1" ]; then echo "refusing to build from a dirty tree ($$v)" >&2; exit 1; fi ;; \
+	esac; \
+	rm -rf dist && mkdir -p dist; \
+	for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do \
+	  os=$${target%/*}; arch=$${target#*/}; \
+	  name="trackd_$${v}_$${os}_$${arch}"; ext=""; \
+	  [ "$$os" = windows ] && ext=".exe"; \
+	  mkdir -p "dist/$$name"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w -X main.version=$$v" -o "dist/$$name/trackd$$ext" . || exit 1; \
+	  cp README.md LICENSE "dist/$$name/"; \
+	  if [ "$$os" = windows ]; then (cd dist && zip -qr "$$name.zip" "$$name"); else tar -C dist -czf "dist/$$name.tar.gz" "$$name"; fi; \
+	  rm -rf "dist/$$name"; \
+	done; \
+	(cd dist && shasum -a 256 *.tar.gz *.zip > checksums.txt); \
+	ls -1 dist
 
 clean:
 	rm -rf bin

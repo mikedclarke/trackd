@@ -211,7 +211,7 @@ func TestMCPWorkflow(t *testing.T) {
 	var comment store.Comment
 	callTool(t, session, "add_comment", map[string]any{
 		"key":  "TSK-1",
-		"body": "работа done — ✓",
+		"body": "работа done ✓",
 	}, &comment)
 	// Attribution defaults to the authenticated token's name.
 	if comment.Actor != "pm" {

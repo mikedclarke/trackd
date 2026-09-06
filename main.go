@@ -67,6 +67,8 @@ func run(args []string) error {
 		return cmdHealth(rest)
 	case "token":
 		return cmdToken(rest)
+	case "setting":
+		return cmdSetting(rest)
 	case "backup":
 		return cmdBackup(rest)
 	case "restore":
@@ -416,6 +418,7 @@ Usage:
 Server commands (operate on the database file directly):
   serve     run the server                             (--db, --addr, --backup-dir, --backup-every, --backup-keep, --backup-timeout)
   token     manage API tokens: add | list | revoke     (--db, --role)
+  setting   view or change settings: list | get | set  (--db) [key] [value]
   backup    write a verified snapshot of the database  (--db, --to, --keep)
   restore   restore a snapshot to a new database file  (--db)
   export    dump the full database as JSONL            (--db, --out)
@@ -439,4 +442,93 @@ Exit codes: 0 ok, 1 unexpected, 2 usage or validation, 3 not found, 4 auth,
 5 conflict, 6 server or network.
 The database path defaults to $TRACKD_DB, then ./trackd.db.
 `)
+}
+
+// cmdSetting reads and writes the operator-facing settings: the issue key
+// prefix, the exclusive label groups and the base URL. Reads open the file
+// read-only; a write takes the exclusive lock like every other server command
+// that changes the database, so stop the server first.
+func cmdSetting(args []string) error {
+	if len(args) == 0 {
+		return usagef("usage: trackd setting <list|get|set> [--db <path>] [--json] [key] [value]")
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("setting "+sub, flag.ContinueOnError)
+	db := fs.String("db", defaultDB(), "database path")
+	jsonOut := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	switch sub {
+	case "list":
+		if fs.NArg() != 0 {
+			return usagef("usage: trackd setting list [--db <path>] [--json]")
+		}
+		st, err := store.OpenReadOnly(*db)
+		if err != nil {
+			return openError(*db, err)
+		}
+		defer st.Close()
+		list, err := st.ListSettings()
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return printJSON(map[string]any{"settings": list})
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "KEY\tVALUE\tDESCRIPTION")
+		for _, v := range list {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", v.Key, v.Value, v.Description)
+		}
+		return w.Flush()
+	case "get":
+		if fs.NArg() != 1 {
+			return usagef("usage: trackd setting get [--db <path>] [--json] <key>")
+		}
+		key := fs.Arg(0)
+		st, err := store.OpenReadOnly(*db)
+		if err != nil {
+			return openError(*db, err)
+		}
+		defer st.Close()
+		list, err := st.ListSettings()
+		if err != nil {
+			return err
+		}
+		for _, v := range list {
+			if v.Key == key {
+				if *jsonOut {
+					return printJSON(v)
+				}
+				fmt.Println(v.Value)
+				return nil
+			}
+		}
+		return usagef("unknown setting %q (run: trackd setting list)", key)
+	case "set":
+		if fs.NArg() != 2 {
+			return usagef("usage: trackd setting set [--db <path>] <key> <value>")
+		}
+		key, value := fs.Arg(0), fs.Arg(1)
+		if err := store.ValidateSetting(key, value); err != nil {
+			return usagef("%v", err)
+		}
+		st, release, err := openLocked(*db)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		defer release()
+		if err := st.SetSetting(key, value); err != nil {
+			return err
+		}
+		if *jsonOut {
+			return printJSON(map[string]string{"key": key, "value": value})
+		}
+		fmt.Printf("%s = %s\n", key, value)
+		return nil
+	default:
+		return usagef("unknown setting subcommand %q", sub)
+	}
 }

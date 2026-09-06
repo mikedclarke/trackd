@@ -300,7 +300,7 @@ type BackupConfig struct {
 	Every time.Duration
 	Keep  int
 	// Timeout bounds each backup run; 0 means a 10 minute default. A run that
-	// exceeds it is abandoned and recorded as a failure — it must never block
+	// exceeds it is abandoned and recorded as a failure: it must never block
 	// the next run or, via the store, API traffic.
 	Timeout time.Duration
 }

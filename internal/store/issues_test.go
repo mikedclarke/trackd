@@ -168,14 +168,17 @@ func TestUpdateIssueStatusTimestamps(t *testing.T) {
 // S8
 func TestUpdateIssueLabelRules(t *testing.T) {
 	s := openTestStore(t)
-	mustLabel(t, s, "claude-ready", "needs-mike", "seo")
+	if err := s.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
+		t.Fatal(err)
+	}
+	mustLabel(t, s, "ready", "blocked", "seo")
 	issue := mustCreateIssue(t, s, IssueInput{Title: "Routing", Labels: []string{"seo"}}, "pm")
 
 	replace := []string{"seo"}
-	if _, err := s.UpdateIssue(issue.Key, IssuePatch{Labels: &replace, AddLabels: []string{"claude-ready"}}, "pm"); err == nil {
+	if _, err := s.UpdateIssue(issue.Key, IssuePatch{Labels: &replace, AddLabels: []string{"ready"}}, "pm"); err == nil {
 		t.Error("labels and add_labels together were accepted")
 	}
-	ready, err := s.UpdateIssue(issue.Key, IssuePatch{AddLabels: []string{"claude-ready"}}, "pm")
+	ready, err := s.UpdateIssue(issue.Key, IssuePatch{AddLabels: []string{"ready"}}, "pm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,21 +186,21 @@ func TestUpdateIssueLabelRules(t *testing.T) {
 		t.Fatalf("labels = %v", ready.Labels)
 	}
 	// The exclusive group swaps rather than accumulating.
-	mike, err := s.UpdateIssue(issue.Key, IssuePatch{AddLabels: []string{"needs-mike"}}, "pm")
+	blocked, err := s.UpdateIssue(issue.Key, IssuePatch{AddLabels: []string{"blocked"}}, "pm")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if containsFold(mike.Labels, "claude-ready") || !containsFold(mike.Labels, "needs-mike") {
-		t.Errorf("labels = %v, want claude-ready swapped out", mike.Labels)
+	if containsFold(blocked.Labels, "ready") || !containsFold(blocked.Labels, "blocked") {
+		t.Errorf("labels = %v, want ready swapped out", blocked.Labels)
 	}
-	removed, err := s.UpdateIssue(issue.Key, IssuePatch{RemoveLabels: []string{"NEEDS-MIKE"}}, "pm")
+	removed, err := s.UpdateIssue(issue.Key, IssuePatch{RemoveLabels: []string{"BLOCKED"}}, "pm")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(removed.Labels) != 1 || removed.Labels[0] != "seo" {
 		t.Errorf("labels after remove = %v", removed.Labels)
 	}
-	both := []string{"claude-ready", "needs-mike"}
+	both := []string{"ready", "blocked"}
 	if _, err := s.UpdateIssue(issue.Key, IssuePatch{Labels: &both}, "pm"); !errors.Is(err, ErrConflict) {
 		t.Errorf("replace with two members of one group = %v, want ErrConflict", err)
 	}
@@ -399,11 +402,11 @@ func TestRelationsTouchBothIssues(t *testing.T) {
 // S11
 func TestListIssuesFilterMatrix(t *testing.T) {
 	s := openTestStore(t)
-	mustLabel(t, s, "claude-ready", "seo")
+	mustLabel(t, s, "ready", "seo")
 	if _, err := s.CreateProject(ProjectInput{Name: "Rebuild"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	one := mustCreateIssue(t, s, IssueInput{Title: "Fix header", Status: "Todo", Project: "rebuild", Priority: 3, Labels: []string{"claude-ready"}}, "")
+	one := mustCreateIssue(t, s, IssueInput{Title: "Fix header", Status: "Todo", Project: "rebuild", Priority: 3, Labels: []string{"ready"}}, "")
 	two := mustCreateIssue(t, s, IssueInput{Title: "50% off banner", Status: "Todo", Priority: 1, Labels: []string{"seo"}}, "")
 	three := mustCreateIssue(t, s, IssueInput{Title: "Audit", Status: "In Progress"}, "")
 	if _, _, err := s.AddComment(three.Key, CommentInput{Body: "found a redirect chain"}, "seo"); err != nil {
