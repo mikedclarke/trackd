@@ -64,7 +64,7 @@ func usagef(format string, args ...any) error {
 // --help itself with its flag list.
 func groupUsage(args []string, line string) (handled bool, err error) {
 	if len(args) == 0 {
-		return true, usagef(line)
+		return true, usagef("%s", line)
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
