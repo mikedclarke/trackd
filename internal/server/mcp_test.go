@@ -324,6 +324,7 @@ func TestMCPErrorsCarryTheirCode(t *testing.T) {
 		{"unknown label", "save_issue", map[string]any{"mode": "create", "title": "x", "labels": []string{"nope"}}, "[invalid_ref]"},
 		{"bad priority", "save_issue", map[string]any{"mode": "create", "title": "x", "priority": 9}, "[validation]"},
 		{"description replace", "save_issue", map[string]any{"mode": "update", "key": issue.Key, "description": "overwrite"}, "[description_replace]"},
+		{"replace as an agent", "save_issue", map[string]any{"mode": "update", "key": issue.Key, "description": "overwrite", "replace_description": true}, "[forbidden]"},
 		{"version conflict", "save_issue", map[string]any{"mode": "update", "key": issue.Key, "title": "y", "expected_version": 99}, "[version_conflict]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

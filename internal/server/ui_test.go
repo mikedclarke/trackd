@@ -253,6 +253,12 @@ func TestUIBoardAndIssue(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, "TSK-1") {
 		t.Errorf("assignee-filtered board = %d", code)
 	}
+	// A filter naming nothing can only come from a hand-edited URL, and it is
+	// the caller's mistake, not the server's.
+	code, _ = fetch(t, client, ts.URL+"/?project=no-such-project")
+	if code != http.StatusBadRequest {
+		t.Errorf("board with an unknown project = %d, want 400", code)
+	}
 
 	// The stylesheet is served without auth (it is static and harmless).
 	code, body = fetch(t, client, ts.URL+"/ui/static/style.css")

@@ -103,6 +103,27 @@ func (e *testEnv) label(names ...string) {
 	}
 }
 
+// adminToken mints an admin identity on demand. It is not part of the default
+// environment because minting a token records an event, and the feed tests
+// count them.
+func (e *testEnv) adminToken() string {
+	e.t.Helper()
+	token, err := e.store.CreateToken("owner", "admin")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return token
+}
+
+// withToken runs fn as another identity, for the writes a role decides.
+func (e *testEnv) withToken(token string, fn func()) {
+	e.t.Helper()
+	saved := e.token
+	e.token = token
+	defer func() { e.token = saved }()
+	fn()
+}
+
 func (e *testEnv) issues(query string) issueListResponse {
 	e.t.Helper()
 	var list issueListResponse
@@ -361,6 +382,51 @@ func TestIssueListFiltersAndPaging(t *testing.T) {
 	}
 }
 
+// A filter value that resolves to nothing is a typo, and a typo must not come
+// back as an empty page: a session reads that as "no work" and stops.
+func TestIssueListRejectsUnresolvableFilters(t *testing.T) {
+	e := newTestEnv(t)
+	e.label("alpha")
+	e.expect("POST", "/api/v1/projects", map[string]any{"name": "Rebuild"}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/milestones", map[string]any{"project": "rebuild", "name": "Launch"}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/issues", map[string]any{
+		"title": "parent", "project": "rebuild", "milestone": "Launch",
+		"labels": []string{"alpha"}, "assignee": "pm",
+	}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "child", "parent": "TSK-1"}, http.StatusCreated, nil)
+
+	for _, tc := range []struct {
+		name  string
+		good  string
+		found int
+		typo  string
+		names string // the message has to name the value the caller got wrong
+	}{
+		{"status", "?status=Triage", 2, "?status=Triageee", "Triageee"},
+		{"status_type", "?status_type=triage", 2, "?status_type=triaged", "triaged"},
+		{"project", "?project=rebuild", 1, "?project=rebiuld", "rebiuld"},
+		{"label", "?label=alpha", 1, "?label=alphaa", "alphaa"},
+		{"exclude_label", "?exclude_label=alpha", 1, "?exclude_label=alphaa", "alphaa"},
+		{"milestone", "?milestone=Launch", 1, "?milestone=Launched", "Launched"},
+		{"parent", "?parent=TSK-1", 1, "?parent=TSK-11", "TSK-11"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if list := e.issues(tc.good); len(list.Issues) != tc.found {
+				t.Fatalf("%s = %d issues, want %d", tc.good, len(list.Issues), tc.found)
+			}
+			got := e.expectError("GET", "/api/v1/issues"+tc.typo, nil, http.StatusUnprocessableEntity, codeInvalidRef)
+			if !strings.Contains(got.Error, tc.names) {
+				t.Errorf("%s error = %q, want it to name %q", tc.name, got.Error, tc.names)
+			}
+		})
+	}
+
+	// Assignees are free-form names, so an unknown one is still an empty page.
+	if list := e.issues("?assignee=nobody"); len(list.Issues) != 0 {
+		t.Errorf("unknown assignee = %+v", list)
+	}
+}
+
 func TestIssueIdempotentCreate(t *testing.T) {
 	e := newTestEnv(t)
 	var first, replay store.Issue
@@ -417,13 +483,73 @@ func TestDescriptionIsAppendOnly(t *testing.T) {
 		"append": "x",
 	}, http.StatusNotFound, codeNotFound)
 
-	e.expect("PATCH", "/api/v1/issues/"+issue.Key, map[string]any{
-		"description":         "deliberate replacement",
-		"replace_description": true,
-	}, http.StatusOK, &issue)
+	// The deliberate overwrite is an admin-token action; TestReplaceDescription
+	// NeedsAdmin owns that rule.
+	e.withToken(e.adminToken(), func() {
+		e.expect("PATCH", "/api/v1/issues/"+issue.Key, map[string]any{
+			"description":         "deliberate replacement",
+			"replace_description": true,
+		}, http.StatusOK, &issue)
+	})
 	if issue.Description != "deliberate replacement" {
 		t.Errorf("replaced description = %q", issue.Description)
 	}
+}
+
+// Replacing a description is the one write a role decides: an agent token is
+// refused with a 403 that names the rule, an admin token goes through. The
+// CLI's --clear-description is the same field with an empty description beside
+// it, so it is refused the same way.
+func TestReplaceDescriptionNeedsAdmin(t *testing.T) {
+	e := newTestEnv(t)
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{
+		"title":       "runbook",
+		"description": "the steps",
+	}, http.StatusCreated, &issue)
+	key := "/api/v1/issues/" + issue.Key
+
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"replace", map[string]any{"description": "overwritten", "replace_description": true}},
+		{"clear", map[string]any{"description": "", "replace_description": true}},
+	} {
+		t.Run(tc.name+" as an agent", func(t *testing.T) {
+			got := e.expectError("PATCH", key, tc.body, http.StatusForbidden, codeForbidden)
+			if !strings.Contains(got.Error, "admin token") {
+				t.Errorf("message = %q, want the rule named", got.Error)
+			}
+		})
+	}
+
+	// The append-only path an agent is meant to use still works.
+	e.expect("POST", key+"/description", map[string]any{"append": "a note"}, http.StatusOK, &issue)
+	if issue.Description != "the steps\n\na note" {
+		t.Fatalf("append as an agent = %q", issue.Description)
+	}
+
+	admin := e.adminToken()
+	e.withToken(admin, func() {
+		e.expect("PATCH", key, map[string]any{
+			"description":         "rewritten by the owner",
+			"replace_description": true,
+		}, http.StatusOK, &issue)
+	})
+	if issue.Description != "rewritten by the owner" {
+		t.Errorf("replaced description = %q", issue.Description)
+	}
+	e.withToken(admin, func() {
+		var cleared store.Issue
+		e.expect("PATCH", key, map[string]any{
+			"description":         "",
+			"replace_description": true,
+		}, http.StatusOK, &cleared)
+		if cleared.Description != "" {
+			t.Errorf("cleared description = %q", cleared.Description)
+		}
+	})
 }
 
 func TestLabelOperations(t *testing.T) {
@@ -546,6 +672,8 @@ func TestEventFeeds(t *testing.T) {
 	}
 	e.expectError("GET", "/api/v1/projects/missing/events", nil, http.StatusNotFound, codeNotFound)
 	e.expectError("GET", "/api/v1/milestones/99/events", nil, http.StatusNotFound, codeNotFound)
+	// An entity kind that does not exist is a typo, not an empty feed.
+	e.expectError("GET", "/api/v1/events?entity=issu", nil, http.StatusNotFound, codeNotFound)
 	e.expectError("GET", "/api/v1/events?entitiy=issue", nil, http.StatusBadRequest, codeValidation)
 	e.expectError("GET", "/api/v1/events?since=never", nil, http.StatusBadRequest, codeValidation)
 	e.expectError("GET", "/api/v1/events?after_id=x", nil, http.StatusBadRequest, codeValidation)
@@ -761,6 +889,64 @@ func TestBackupSkipsRecentSnapshot(t *testing.T) {
 	code, body := e.health()
 	if code != http.StatusOK || body.Backup.LastAt == "" {
 		t.Errorf("health after skip = %d %+v", code, body.Backup)
+	}
+}
+
+// After a skipped startup run the next snapshot is due when the existing one
+// ages out, not a full interval after this process started: a restart must not
+// stretch the gap to almost twice the interval.
+func TestFirstBackupDelay(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		every time.Duration
+		age   time.Duration
+		want  time.Duration
+	}{
+		{"fresh snapshot", 24 * time.Hour, 0, 24 * time.Hour},
+		{"part-way through the interval", 24 * time.Hour, 6 * time.Hour, 18 * time.Hour},
+		{"already due", 24 * time.Hour, 25 * time.Hour, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstBackupDelay(tc.every, tc.age); got != tc.want {
+				t.Errorf("firstBackupDelay(%s, %s) = %s, want %s", tc.every, tc.age, got, tc.want)
+			}
+		})
+	}
+}
+
+// The scheduler keeps running after a skipped startup run: the aligned first
+// run fires, and the interval ticker takes over from there.
+func TestBackupRunsAfterSkippedStartup(t *testing.T) {
+	e := newTestEnv(t)
+	dir := t.TempDir()
+	snapshot, err := e.store.Backup(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Age the snapshot by an eighth of the interval, so the startup run is
+	// skipped and the first scheduled run is due a moment later.
+	every := 400 * time.Millisecond
+	aged := time.Now().Add(-every / 8)
+	if err := os.Chtimes(snapshot, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go e.server.RunBackups(ctx, BackupConfig{Dir: dir, Every: every})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) > 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no scheduled snapshot after the startup run was skipped: %d files", len(entries))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

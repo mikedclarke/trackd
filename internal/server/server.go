@@ -156,6 +156,21 @@ func writeAuthError(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusUnauthorized, codeUnauthorized, msg)
 }
 
+// roleAdmin is the token role the store records for a privileged identity;
+// every other token is an agent.
+const roleAdmin = "admin"
+
+// tokenRole is the authenticating token's role. Every route that reaches a
+// handler sits behind auth, so an absent token is not a caller with fewer
+// rights, it is a programming error, and it reads as the least privilege
+// there is.
+func tokenRole(r *http.Request) string {
+	if t, ok := r.Context().Value(tokenKey).(*store.Token); ok {
+		return t.Role
+	}
+	return ""
+}
+
 // actor resolves attribution for a write: an explicit actor in the request
 // body wins, otherwise the authenticating token's name is used.
 func actor(r *http.Request, explicit string) string {
@@ -341,6 +356,17 @@ func (s *Server) RunBackups(ctx context.Context, cfg BackupConfig) {
 		s.lastBackup = backupStatus{At: time.Now().Add(-age)}
 		s.mu.Unlock()
 		log.Printf("backup skipped: newest snapshot is %s old", age.Round(time.Second))
+		// The interval belongs to the snapshots, not to this process: waiting a
+		// full interval after a restart would leave a gap of almost twice the
+		// interval and trip a backup-age alarm that has nothing wrong to report.
+		timer := time.NewTimer(firstBackupDelay(every, age))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			run()
+		}
 	} else {
 		run()
 	}
@@ -354,6 +380,16 @@ func (s *Server) RunBackups(ctx context.Context, cfg BackupConfig) {
 			run()
 		}
 	}
+}
+
+// firstBackupDelay is how long to wait for the first scheduled run when the
+// startup run was skipped: what is left of the interval the existing snapshot
+// has already spent. A snapshot older than the interval is due now.
+func firstBackupDelay(every, age time.Duration) time.Duration {
+	if age >= every {
+		return 0
+	}
+	return every - age
 }
 
 func logRequests(next http.Handler) http.Handler {
@@ -453,7 +489,15 @@ const (
 	codeValidation         = "validation"
 	codeInternal           = "internal"
 	codeUnauthorized       = "unauthorized"
+	codeForbidden          = "forbidden"
 )
+
+// errAdminOnly is the one rule this package enforces on top of the store's own:
+// replacing a description is an admin-token action. The append-only default
+// already makes an accidental overwrite impossible; this puts the deliberate
+// overwrite behind an identity a person holds, because the agent that erased a
+// runbook is not the one who notices.
+var errAdminOnly = errors.New("replacing a description needs an admin token; agents use append")
 
 type errorBody struct {
 	Error string `json:"error"`
@@ -470,7 +514,8 @@ func writeValidation(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusBadRequest, codeValidation, msg)
 }
 
-// classify maps a store failure onto its HTTP status and machine code.
+// classify maps a store failure, or this package's own errAdminOnly, onto its
+// HTTP status and machine code.
 //
 // The two specific conflicts are tested first because both also satisfy
 // ErrConflict. Beyond the sentinels the store reports its own validation
@@ -493,6 +538,8 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, codeNotFound
 	case errors.Is(err, store.ErrBusy):
 		return http.StatusServiceUnavailable, codeBusy
+	case errors.Is(err, errAdminOnly):
+		return http.StatusForbidden, codeForbidden
 	case isInternal(err):
 		return http.StatusInternalServerError, codeInternal
 	default:

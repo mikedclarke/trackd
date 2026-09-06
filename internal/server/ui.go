@@ -178,6 +178,12 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 		filter.Labels = []string{label}
 	}
 	issues, err := s.store.ListIssues(filter)
+	if errors.Is(err, store.ErrInvalidRef) {
+		// A filter naming a project or label that does not exist can only come
+		// from a hand-edited URL: the board's own controls offer real values.
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

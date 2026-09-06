@@ -15,14 +15,14 @@ import (
 
 // mcpHandler serves MCP over streamable HTTP. It sits behind the same bearer
 // auth as the REST API; the MCP server is built per request (stateless mode)
-// so each tool handler closes over the authenticated token's actor.
+// so each tool handler closes over the authenticated token's actor and role.
 func (s *Server) mcpHandler() http.Handler {
 	return mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		tokenActor := ""
+		tokenActor, role := "", ""
 		if t, ok := r.Context().Value(tokenKey).(*store.Token); ok {
-			tokenActor = t.Name
+			tokenActor, role = t.Name, t.Role
 		}
-		return s.newMCPServer(tokenActor)
+		return s.newMCPServer(tokenActor, role)
 	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 }
 
@@ -117,7 +117,7 @@ type mcpSaveIssueIn struct {
 	Title              *string   `json:"title,omitempty" jsonschema:"issue title; required with mode create"`
 	Description        *string   `json:"description,omitempty" jsonschema:"issue description in markdown; on update it needs replace_description, because descriptions are append-only"`
 	AppendDescription  string    `json:"append_description,omitempty" jsonschema:"text to add to the end of the description, the safe way to add to another agent's notes"`
-	ReplaceDescription bool      `json:"replace_description,omitempty" jsonschema:"allow description to overwrite an existing description instead of appending"`
+	ReplaceDescription bool      `json:"replace_description,omitempty" jsonschema:"allow description to overwrite an existing description instead of appending; admin tokens only"`
 	Status             *string   `json:"status,omitempty" jsonschema:"status name: Triage, Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate"`
 	Priority           *int      `json:"priority,omitempty" jsonschema:"priority 0-4: 0 none, 1 urgent, 2 high, 3 medium, 4 low"`
 	Project            *string   `json:"project,omitempty" jsonschema:"project slug; empty string clears"`
@@ -254,7 +254,7 @@ func toMCPEvents(events []store.Event) ([]mcpEvent, error) {
 	return out, nil
 }
 
-func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
+func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "trackd", Title: "trackd", Version: s.version}, nil)
 	resolve := func(explicit string) string {
 		if explicit != "" {
@@ -321,7 +321,7 @@ func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "save_issue",
 		Annotations: writeTool(true),
-		Description: "Create an issue with mode create (title required, key rejected) or change one with mode update (key required); only the fields you pass change, descriptions are append-only unless replace_description is set, and every label name must already exist.",
+		Description: "Create an issue with mode create (title required, key rejected) or change one with mode update (key required); only the fields you pass change, descriptions are append-only unless replace_description is set (which needs an admin token), and every label name must already exist.",
 		InputSchema: enumSchema[mcpSaveIssueIn](map[string][]any{"mode": {"create", "update"}}),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveIssueIn) (*mcp.CallToolResult, store.Issue, error) {
 		act := resolve(in.Actor)
@@ -357,6 +357,9 @@ func (s *Server) newMCPServer(tokenActor string) *mcp.Server {
 		case "update":
 			if in.Key == "" {
 				return nil, store.Issue{}, mcpError(errors.New("mode update needs a key"))
+			}
+			if in.ReplaceDescription && role != roleAdmin {
+				return nil, store.Issue{}, mcpError(errAdminOnly)
 			}
 			var appended *store.Issue
 			if in.AppendDescription != "" {

@@ -34,8 +34,9 @@ CLI, MCP endpoint, embedded read-only web UI.
   before/after state. Never weaken the SQLite durability pragmas. Migrations
   snapshot the database before applying.
 - **Descriptions are append-only.** An update that would overwrite a non-empty
-  description is refused unless the request carries `replace_description`. Keep
-  it that way: it is what stops one agent erasing another's context.
+  description is refused unless the request carries `replace_description`, which
+  in turn needs an `admin` token (403 `forbidden` otherwise). Keep it that way:
+  it is what stops one agent erasing another's context.
 - **One writer.** `serve` holds an exclusive advisory lock on the database file.
   Commands that only read (`export`, `backup`, `token list`) open read-only;
   commands that write (`token add`, `token revoke`, `import`, `restore`) take the

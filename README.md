@@ -78,7 +78,9 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   that would overwrite it is refused with a 409. Add to it with
   `trackd issue append KEY --text ...`, or pass `--replace-description` to say
   you meant to overwrite. This is the rule that stops one agent erasing another
-  agent's context.
+  agent's context. Overwriting is also the one write a role decides:
+  `--replace-description` and `--clear-description` need an `admin` token, and
+  an `agent` token is refused with a 403 (`forbidden`, CLI exit 4).
 - **Labels are added and removed, not replaced.** `--add-label` and
   `--remove-label` leave the rest of the set alone; `--labels` still replaces the
   whole set when that is what you want, and `--clear-labels` empties it. Labels
@@ -119,7 +121,9 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   dates (due, start, target) are plain `YYYY-MM-DD`.
 - **Tokens are identities.** Mint one per agent (`trackd token add pm`). Writes
   are attributed to the token's name unless the request passes an explicit
-  `actor`. Roles: `agent` or `admin` (reserved for future privileged endpoints).
+  `actor`. Roles: `agent` (the default) or `admin`. Every write is open to both
+  except one: replacing or clearing a description, which needs `admin`. Give the
+  agents `agent` tokens and keep an `admin` token for yourself.
 
 ## Interfaces
 
@@ -138,7 +142,14 @@ Issue list filters: `status`, `status_type`, `label` and `exclude_label` (all
 repeatable), `project`, `parent`, `assignee`, `milestone`, `q`, `updated_since`,
 `completed_since`, `archived` (`true` includes archived issues, `only` restricts
 to them), `order_by` (`updated`, `created`, `priority`), `limit` (default 100,
-max 500), `offset`. An unknown parameter is a 400.
+max 500), `offset`. An unknown parameter is a 400. A filter value that names
+nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
+or a project slug cannot read as "no work": `status`, `status_type`, `project`,
+`label`, `exclude_label`, `milestone` and `parent` all resolve before the query.
+Assignees are free-form names, so an unknown one is simply an empty result.
+`GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone` or
+`token` (a comment or a relation is recorded against its issue); any other value
+is a 404.
 
 Every list response is an envelope, never a bare array:
 `{"issues": [...], "next_offset": N|null}`, and `{"comments": [...]}`,
@@ -147,14 +158,18 @@ Every list response is an envelope, never a bare array:
 
 PATCH bodies change only the fields they include. `labels` replaces the set;
 `add_labels` and `remove_labels` amend it; sending both forms in one request is a
-400. `replace_description: true` permits an overwrite, `expected_version` guards
-against a lost update. There are no DELETE endpoints by design.
+400. `replace_description: true` permits an overwrite and requires an `admin`
+token (clearing a description is that field with `"description": ""` beside it,
+so it is the same rule); `expected_version` guards against a lost update. There
+are no DELETE endpoints by design.
 
 Errors are always `{"error": "human message", "code": "..."}` where the code is
-one of `validation` (400), `not_found` (404), `conflict`, `version_conflict` or
-`description_replace` (409), `invalid_ref` (422, a referenced status, project,
-milestone, parent or label does not resolve), `busy` (503, with `Retry-After: 1`)
-and `internal` (500). Unmatched routes and methods use the same shape.
+one of `validation` (400), `unauthorized` (401), `forbidden` (403, a write this
+token's role may not make: replacing a description), `not_found` (404),
+`conflict`, `version_conflict` or `description_replace` (409), `invalid_ref`
+(422, a referenced or filtered status, project, milestone, parent or label does
+not resolve), `busy` (503, with `Retry-After: 1`) and `internal` (500).
+Unmatched routes and methods use the same shape.
 
 `GET /healthz` is unauthenticated and reports
 `{"status": "ok"|"degraded", "version", "schema", "backup": {...},
@@ -163,15 +178,23 @@ integrity check failed, the last backup errored or is older than twice the
 configured interval, or the scheduler is off. The body carries no filesystem
 paths.
 
+`backup` reports the server's own scheduled snapshots in `--backup-dir`, and
+nothing else. A copy taken by another tool, on a schedule of its own or into
+another directory, never reaches this counter, so a stale `last_at` here means
+"the scheduler has not run", not "there is no recent backup". If an external job
+is your real backup, point it at `--backup-dir` or monitor it separately, and
+read this number as what it is: the health of the scheduler.
+
 ### CLI
 
 `issue list|show|create|update|append|comment|relate|events`, `comment edit`,
 `events`, `project list|show|create|update`, `milestone list|create|update`,
-`label list|add`, `statuses`, `health`. Connection via `--url`/`--token` or
-`$TRACKD_URL`/`$TRACKD_TOKEN`. Every command takes `--json` for machine-readable
-output, on failure too: the error object goes to stdout and the human line to
-stderr. Flags may come before or after the positional key, so
-`trackd issue show --json TSK-1` works.
+`label list|add`, `statuses`, `health` (a table of status, version, schema,
+backup age and integrity, or the raw report with `--json`). Connection via
+`--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`. Every command takes
+`--json` for machine-readable output, on failure too: the error object goes to
+stdout and the human line to stderr. Flags may come before or after the
+positional key, so `trackd issue show --json TSK-1` works.
 
 Two rules protect a field from an empty shell variable:
 
@@ -182,11 +205,12 @@ Two rules protect a field from an empty shell variable:
   empty rather than writing nothing over something.
 
 Exit codes: 0 ok, 1 unexpected, 2 usage or validation (400, 422), 3 not found
-(404), 4 auth (401), 5 conflict (409), 6 server or network (5xx, or the server
-could not be reached). The client gives a busy server and a refused connection
-three retries with 250ms, 1s and 3s backoff, and times out a request after 10
-seconds. A create is retried only when it carries an idempotency key, so a repeat
-can never make a duplicate.
+(404), 4 auth (401, 403), 5 conflict (409), 6 server or network (5xx, or the
+server could not be reached). A mistyped flag, like an unknown command, is a
+usage error: exit 2, `code: "usage"`. The client gives a busy server and a
+refused connection three retries with 250ms, 1s and 3s backoff, and times out a
+request after 10 seconds. A create is retried only when it carries an
+idempotency key, so a repeat can never make a duplicate.
 
 Server maintenance commands (`serve`, `token`, `backup`, `restore`, `export`,
 `import`) operate on the database file directly.
@@ -199,8 +223,9 @@ Streamable HTTP at `/mcp`, same bearer auth. Twelve tools: `list_issues`,
 `save_milestone`, `list_labels`, `list_statuses`, `save_relation`,
 `list_activity`. `save_issue` takes a required `mode` of `create` or `update`, so
 a missing key can never turn an update into a new issue, and carries the same
-`append_description`, `add_labels`, `remove_labels`, `replace_description`,
-`expected_version` and `idempotency_key` fields as the API. The read tools are
+`append_description`, `add_labels`, `remove_labels`, `replace_description`
+(admin tokens only, as over REST), `expected_version` and `idempotency_key`
+fields as the API. The read tools are
 annotated read-only, and nothing in the tool set is destructive.
 
 For Claude Code, add to `.mcp.json`:

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/mikedclarke/trackd/internal/client"
@@ -56,6 +57,68 @@ func TestErrorObject(t *testing.T) {
 	obj = errorObject(&client.TransportError{Op: "GET /", Err: errors.New("connection refused")})
 	if obj["code"] != "unreachable" || obj["exit"] != 6 {
 		t.Errorf("transport error object = %v", obj)
+	}
+}
+
+// A mistyped flag is a mistake in the command line, so it exits 2 as a usage
+// error like an unknown command already does, not 1, which scripts read as
+// "trackd itself went wrong".
+func TestUndefinedFlagIsAUsageError(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		n    int
+	}{
+		{"no positional", []string{"--frobnicate", "x"}, 0},
+		{"with a key", []string{"GDL-1", "--frobnicate", "x"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
+			addCommon(fs)
+			_, err := parseArgs(fs, tc.args, tc.n, "trackd issue list [flags]")
+			var usage *usageError
+			if !errors.As(err, &usage) {
+				t.Fatalf("undefined flag = %v, want a usage error", err)
+			}
+			if !strings.Contains(err.Error(), "frobnicate") {
+				t.Errorf("message = %q, want it to name the flag", err.Error())
+			}
+			// Both output shapes: the exit code a plain caller reads, and the
+			// error object a --json caller parses off stdout.
+			if got := exitCode(err); got != 2 {
+				t.Errorf("exit code = %d, want 2", got)
+			}
+			obj := errorObject(err)
+			if obj["code"] != "usage" || obj["exit"] != 2 {
+				t.Errorf("--json error object = %v", obj)
+			}
+		})
+	}
+
+	// A help request stays a help request: main prints no error line for it.
+	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
+	addCommon(fs)
+	err := parseFlags(fs, []string{"--help"}, "trackd issue list [flags]")
+	if !errors.Is(err, flag.ErrHelp) || exitCode(err) != 2 {
+		t.Errorf("--help = %v (exit %d), want flag.ErrHelp and exit 2", err, exitCode(err))
+	}
+}
+
+// Replacing a description is refused to an agent token, and the CLI reports
+// that refusal as an auth failure rather than something to retry.
+func TestForbiddenExitsFour(t *testing.T) {
+	err := &client.APIError{
+		Status:  403,
+		Code:    "forbidden",
+		Message: "replacing a description needs an admin token; agents use append",
+	}
+	if got := exitCode(err); got != 4 {
+		t.Errorf("exit code = %d, want 4", got)
+	}
+	obj := errorObject(err)
+	if obj["code"] != "forbidden" || obj["exit"] != 4 || obj["status"] != 403 {
+		t.Errorf("error object = %v", obj)
 	}
 }
 
@@ -208,6 +271,36 @@ func TestWrongNumberOfPositionalsIsAUsageError(t *testing.T) {
 		if exitCode(err) != 2 {
 			t.Errorf("parseArgs(%v) = %v, want a usage error", args, err)
 		}
+	}
+}
+
+// The health report is a loose map, so the human table has to render a missing
+// field rather than invent a zero for it.
+func TestHealthRows(t *testing.T) {
+	report := map[string]any{
+		"status": "ok", "version": "abc1234", "schema": float64(3),
+		"backup":    map[string]any{"last_at": "2026-09-06T07:31:47Z", "age_seconds": float64(90)},
+		"integrity": map[string]any{"ok": true, "checked_at": "2026-09-06T07:31:47Z"},
+	}
+	if got := healthField(report, "schema"); got != "3" {
+		t.Errorf("schema = %q, want 3", got)
+	}
+	if got := healthField(report, "nothing"); got != "-" {
+		t.Errorf("missing field = %q, want a dash", got)
+	}
+	if got := healthBackup(healthSection(report, "backup")); got != "1m30s ago (2026-09-06T07:31:47Z)" {
+		t.Errorf("backup row = %q", got)
+	}
+	if got := healthIntegrity(healthSection(report, "integrity")); got != "ok (checked 2026-09-06T07:31:47Z)" {
+		t.Errorf("integrity row = %q", got)
+	}
+
+	degraded := map[string]any{"backup": map[string]any{}, "integrity": map[string]any{"ok": false}}
+	if got := healthBackup(healthSection(degraded, "backup")); got != "no snapshot recorded" {
+		t.Errorf("backup row without a snapshot = %q", got)
+	}
+	if got := healthIntegrity(healthSection(degraded, "integrity")); got != "failed (never checked)" {
+		t.Errorf("integrity row without a check = %q", got)
 	}
 }
 

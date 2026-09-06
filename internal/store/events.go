@@ -3,8 +3,14 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
+
+// eventEntities are the entity kinds the audit trail records. A comment and a
+// relation are recorded against the issue they belong to, so neither is a kind
+// of its own and neither is a filter value.
+var eventEntities = []string{"issue", "project", "milestone", "token"}
 
 func recordEvent(tx *sql.Tx, entity string, entityID int64, actor, action string, before, after any) error {
 	var beforeJSON, afterJSON any
@@ -97,6 +103,9 @@ func (s *Store) ListAllEvents(f EventFilter) ([]Event, error) {
 		where, args = append(where, "e.id > ?"), append(args, f.AfterID)
 	}
 	if f.Entity != "" {
+		if !containsFold(eventEntities, f.Entity) {
+			return nil, fmt.Errorf("unknown entity %q, want issue, project, milestone or token: %w", f.Entity, ErrNotFound)
+		}
 		where, args = append(where, "e.entity = ?"), append(args, f.Entity)
 	}
 	limit := f.Limit

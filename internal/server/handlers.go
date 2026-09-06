@@ -233,6 +233,12 @@ func (s *Server) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	// The CLI's --clear-description is this same field with an empty
+	// description beside it, so one check covers both ways of losing the text.
+	if req.ReplaceDescription && tokenRole(r) != roleAdmin {
+		writeStoreError(w, r, errAdminOnly)
+		return
+	}
 	if req.empty() {
 		writeValidation(w, "empty patch: no fields to update")
 		return

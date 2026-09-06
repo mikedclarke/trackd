@@ -350,6 +350,9 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 
 	out := []Issue{}
 	err = s.tx(func(tx *sql.Tx) error {
+		if err := validateIssueFilter(tx, f); err != nil {
+			return err
+		}
 		base, err := settingTx(tx, "base_url")
 		if err != nil {
 			return err
@@ -389,6 +392,62 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 		return nil
 	})
 	return out, err
+}
+
+// statusTypes are the workflow phases a status may carry, matching the CHECK
+// constraint on the statuses table.
+var statusTypes = []string{"triage", "backlog", "unstarted", "started", "completed", "canceled"}
+
+// validateIssueFilter resolves the filter values that name something before the
+// query runs, using the same helpers a write does. A typo would otherwise come
+// back as an empty page, which a caller reads as "no work" rather than "bad
+// filter". Assignees are free-form names, so they stay lenient.
+func validateIssueFilter(tx *sql.Tx, f IssueFilter) error {
+	for _, name := range f.Statuses {
+		if _, err := statusByName(tx, name); err != nil {
+			return err
+		}
+	}
+	for _, typ := range f.StatusTypes {
+		if !containsFold(statusTypes, typ) {
+			return fmt.Errorf("status type %q: %w", typ, ErrInvalidRef)
+		}
+	}
+	if f.Project != "" {
+		if _, err := optionalProjectID(tx, f.Project); err != nil {
+			return err
+		}
+	}
+	if _, err := resolveLabels(tx, f.Labels); err != nil {
+		return err
+	}
+	if _, err := resolveLabels(tx, f.ExcludeLabels); err != nil {
+		return err
+	}
+	// The two below are matched by the query itself rather than through the
+	// write path's helpers: a milestone filter spans every project and includes
+	// archived milestones, and a parent filter compares keys case-insensitively.
+	if f.Milestone != "" {
+		if err := refExists(tx, "SELECT 1 FROM milestones WHERE name = ? COLLATE NOCASE", "milestone", f.Milestone); err != nil {
+			return err
+		}
+	}
+	if f.Parent != "" {
+		if err := refExists(tx, "SELECT 1 FROM issues WHERE key = ? COLLATE NOCASE", "parent", f.Parent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// refExists reports a filter value that names nothing as an invalid reference.
+func refExists(tx *sql.Tx, query, kind, value string) error {
+	var one int
+	err := tx.QueryRow(query, value).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%s %q: %w", kind, value, ErrInvalidRef)
+	}
+	return err
 }
 
 func issueOrder(orderBy string) (string, error) {

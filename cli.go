@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/mikedclarke/trackd/internal/client"
 	"github.com/mikedclarke/trackd/internal/store"
@@ -99,13 +101,34 @@ func readValue(flagName, v string) (string, error) {
 	return text, nil
 }
 
+// parseSet parses one flag set and turns a bad flag into a usage error, so a
+// typo exits 2 like every other command-line mistake rather than landing in the
+// exit 1 bucket a script reads as a trackd bug. The flag package writes its own
+// message and a full usage dump on the way out; both are noise once the error
+// carries the message, so the output is captured and replayed only for an
+// explicit help request.
+func parseSet(fs *flag.FlagSet, args []string) error {
+	var out bytes.Buffer
+	fs.SetOutput(&out)
+	err := fs.Parse(args)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, flag.ErrHelp):
+		fmt.Fprint(os.Stderr, out.String())
+		return err
+	default:
+		return usagef("%s", err)
+	}
+}
+
 // parseArgs parses flags and pulls out n positional arguments, which may sit
 // anywhere among the flags: "issue show --json TSK-1" and "issue show TSK-1
 // --json" are the same command.
 func parseArgs(fs *flag.FlagSet, args []string, n int, usage string) ([]string, error) {
 	var positional []string
 	for {
-		if err := fs.Parse(args); err != nil {
+		if err := parseSet(fs, args); err != nil {
 			return nil, err
 		}
 		rest := fs.Args()
@@ -659,7 +682,7 @@ func cmdEvents(args []string) error {
 	common := addCommon(fs)
 	since := fs.String("since", "", "only events at or after this RFC3339 time")
 	afterID := fs.Int64("after-id", 0, "only events after this event id (the cursor from a previous run)")
-	entity := fs.String("entity", "", "filter by entity type: issue, comment, project, milestone, label, relation, token")
+	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone or token (a comment or a relation is recorded against its issue)")
 	limit := fs.Int("limit", 0, "maximum events (default 100, max 1000)")
 	if err := parseFlags(fs, args, "trackd events [flags]"); err != nil {
 		return err
@@ -1082,7 +1105,11 @@ func cmdHealth(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := printJSON(health); err != nil {
+	if *common.jsonOut {
+		if err := printJSON(health); err != nil {
+			return err
+		}
+	} else if err := printHealth(health); err != nil {
 		return err
 	}
 	// A degraded server answers 503. The report is already printed; the exit
@@ -1091,6 +1118,68 @@ func cmdHealth(args []string) error {
 		return &client.APIError{Status: status, Code: "degraded", Message: "server reports degraded health"}
 	}
 	return nil
+}
+
+// printHealth is the human form of the report, one row per fact, in the order
+// an operator asks the questions. The report is a loose map, so every lookup
+// tolerates a field the server did not send.
+func printHealth(health map[string]any) error {
+	backup := healthSection(health, "backup")
+	integrity := healthSection(health, "integrity")
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "FIELD\tVALUE")
+	fmt.Fprintf(w, "status\t%s\n", healthField(health, "status"))
+	fmt.Fprintf(w, "version\t%s\n", healthField(health, "version"))
+	fmt.Fprintf(w, "schema\t%s\n", healthField(health, "schema"))
+	fmt.Fprintf(w, "backup\t%s\n", healthBackup(backup))
+	fmt.Fprintf(w, "integrity\t%s\n", healthIntegrity(integrity))
+	if msg := healthField(backup, "error"); msg != "-" {
+		fmt.Fprintf(w, "backup error\t%s\n", msg)
+	}
+	return w.Flush()
+}
+
+func healthSection(health map[string]any, name string) map[string]any {
+	section, _ := health[name].(map[string]any)
+	return section
+}
+
+// healthField renders one value of the report. JSON numbers arrive as floats
+// and every field is optional, so a missing one reads as a dash rather than an
+// invented zero.
+func healthField(section map[string]any, name string) string {
+	value, ok := section[name]
+	if !ok || value == nil || value == "" {
+		return "-"
+	}
+	if f, ok := value.(float64); ok {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return fmt.Sprintf("%v", value)
+}
+
+func healthBackup(backup map[string]any) string {
+	at := healthField(backup, "last_at")
+	if at == "-" {
+		return "no snapshot recorded"
+	}
+	age, ok := backup["age_seconds"].(float64)
+	if !ok {
+		return at
+	}
+	return fmt.Sprintf("%s ago (%s)", (time.Duration(age) * time.Second).Round(time.Second), at)
+}
+
+func healthIntegrity(integrity map[string]any) string {
+	state := "failed"
+	if ok, _ := integrity["ok"].(bool); ok {
+		state = "ok"
+	}
+	at := healthField(integrity, "checked_at")
+	if at == "-" {
+		return state + " (never checked)"
+	}
+	return fmt.Sprintf("%s (checked %s)", state, at)
 }
 
 // exitCode maps an error to the process exit status. The classes are stable:
