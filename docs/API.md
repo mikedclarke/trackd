@@ -24,9 +24,9 @@ nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
 or a project slug cannot read as "no work": `status`, `status_type`, `project`,
 `label`, `exclude_label`, `milestone` and `parent` all resolve before the query.
 Assignees are free-form names, so an unknown one is simply an empty result.
-`GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone` or
-`token` (a comment or a relation is recorded against its issue); any other value
-is a 404.
+`GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone`,
+`token` or `setting` (a comment or a relation is recorded against its issue);
+any other value is a 404.
 
 ## Responses
 

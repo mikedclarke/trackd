@@ -10,7 +10,7 @@ import (
 // eventEntities are the entity kinds the audit trail records. A comment and a
 // relation are recorded against the issue they belong to, so neither is a kind
 // of its own and neither is a filter value.
-var eventEntities = []string{"issue", "project", "milestone", "token"}
+var eventEntities = []string{"issue", "project", "milestone", "token", "setting"}
 
 func recordEvent(tx *sql.Tx, entity string, entityID int64, actor, action string, before, after any) error {
 	var beforeJSON, afterJSON any
@@ -45,6 +45,7 @@ const eventSelect = `
 	           WHEN 'project' THEN (SELECT p.slug FROM projects p WHERE p.id = e.entity_id)
 	           WHEN 'milestone' THEN (SELECT p.slug || '/' || m.name FROM milestones m
 	                                  JOIN projects p ON p.id = m.project_id WHERE m.id = e.entity_id)
+	           WHEN 'setting' THEN json_extract(e.after_json, '$.key')
 	       END, '')
 	FROM events e`
 
@@ -104,7 +105,7 @@ func (s *Store) ListAllEvents(f EventFilter) ([]Event, error) {
 	}
 	if f.Entity != "" {
 		if !containsFold(eventEntities, f.Entity) {
-			return nil, fmt.Errorf("unknown entity %q, want issue, project, milestone or token: %w", f.Entity, ErrNotFound)
+			return nil, fmt.Errorf("unknown entity %q, want issue, project, milestone, token or setting: %w", f.Entity, ErrNotFound)
 		}
 		where, args = append(where, "e.entity = ?"), append(args, f.Entity)
 	}

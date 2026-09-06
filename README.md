@@ -149,8 +149,8 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   prefix for new issues, `TSK` by default; existing keys keep theirs),
   `label_groups` (the exclusive groups above) and `base_url` (the server's
   public URL, used to fill each issue's `url` field for links in agent output).
-  `set` writes to the database file directly, so it refuses while a server is
-  running: stop the server, set, start it again.
+  Every change is audited. `set` writes to the database file directly, so it
+  refuses while a server is running: stop the server, set, start it again.
 
 ## Interfaces
 

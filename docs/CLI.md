@@ -49,4 +49,4 @@ trackd setting set label_groups '[["ready","blocked"]]'
 trackd setting set base_url https://trackd.example.com
 ```
 
-`set` writes to the database file, so it refuses while a server is running on it. `list` and `get` open the file read-only and are safe at any time.
+Every `set` records a `setting.updated` event with the old and new value (`trackd events --entity setting`). `set` writes to the database file, so it refuses while a server is running on it. `list` and `get` open the file read-only and are safe at any time.

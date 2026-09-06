@@ -698,7 +698,7 @@ func cmdEvents(args []string) error {
 	common := addCommon(fs)
 	since := fs.String("since", "", "only events at or after this RFC3339 time")
 	afterID := fs.Int64("after-id", 0, "only events after this event id (the cursor from a previous run)")
-	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone or token (a comment or a relation is recorded against its issue)")
+	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone, token or setting (a comment or a relation is recorded against its issue)")
 	limit := fs.Int("limit", 0, "maximum events (default 100, max 1000)")
 	if err := parseFlags(fs, args, "trackd events [flags]"); err != nil {
 		return err

@@ -11,6 +11,7 @@ linters:
         - (*database/sql.DB).Close
         - (*database/sql.Rows).Close
         - (*database/sql.Tx).Rollback
+        - (*database/sql.Conn).Close
         - (*os.File).Close
         - (io.Closer).Close
         - (*github.com/mikedclarke/trackd/internal/store.Store).Close

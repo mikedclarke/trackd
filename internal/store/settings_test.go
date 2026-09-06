@@ -35,6 +35,29 @@ func TestValidateSetting(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingRecordsEvent(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpdateSetting("issue_prefix", "bad", "ops"); err == nil {
+		t.Fatal("invalid value accepted")
+	}
+	if err := s.UpdateSetting("issue_prefix", "ACME", "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.Setting("issue_prefix"); v != "ACME" {
+		t.Errorf("issue_prefix = %q", v)
+	}
+	events, err := s.ListAllEvents(EventFilter{Entity: "setting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "setting.updated" || events[0].Actor != "ops" || events[0].EntityKey != "issue_prefix" {
+		t.Fatalf("events = %+v", events)
+	}
+	if string(events[0].Before) != `{"key":"issue_prefix","value":"TSK"}` || string(events[0].After) != `{"key":"issue_prefix","value":"ACME"}` {
+		t.Errorf("before = %s, after = %s", events[0].Before, events[0].After)
+	}
+}
+
 func TestListSettings(t *testing.T) {
 	s := openTestStore(t)
 	list, err := s.ListSettings()

@@ -460,6 +460,7 @@ func cmdSetting(args []string) error {
 	fs := flag.NewFlagSet("setting "+sub, flag.ContinueOnError)
 	db := fs.String("db", defaultDB(), "database path")
 	jsonOut := fs.Bool("json", false, "machine-readable output")
+	actor := fs.String("actor", "", "actor recorded on the audit trail (set only; default cli)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -512,7 +513,7 @@ func cmdSetting(args []string) error {
 		return usagef("unknown setting %q (run: trackd setting list)", key)
 	case "set":
 		if fs.NArg() != 2 {
-			return usagef("usage: trackd setting set [--db <path>] <key> <value>")
+			return usagef("usage: trackd setting set [--db <path>] [--actor <name>] <key> <value>")
 		}
 		key, value := fs.Arg(0), fs.Arg(1)
 		if err := store.ValidateSetting(key, value); err != nil {
@@ -524,7 +525,7 @@ func cmdSetting(args []string) error {
 		}
 		defer st.Close()
 		defer release()
-		if err := st.SetSetting(key, value); err != nil {
+		if err := st.UpdateSetting(key, value, *actor); err != nil {
 			return err
 		}
 		if *jsonOut {

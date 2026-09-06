@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -84,6 +85,34 @@ func ValidateSetting(key, value string) error {
 		}
 	}
 	return nil
+}
+
+// UpdateSetting is the operator write: it validates, stores the value and
+// records a setting.updated event carrying the old and new value, so a change
+// to the key prefix or the label groups shows up in the audit trail like every
+// other mutation. SetSetting is the bare write for internal use.
+func (s *Store) UpdateSetting(key, value, actor string) error {
+	if err := ValidateSetting(key, value); err != nil {
+		return err
+	}
+	if actor == "" {
+		actor = "cli"
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		before, err := settingTx(tx, key)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			key, value,
+		); err != nil {
+			return err
+		}
+		return recordEvent(tx, "setting", 0, actor, "setting.updated",
+			map[string]string{"key": key, "value": before},
+			map[string]string{"key": key, "value": value})
+	})
 }
 
 // ListSettings returns the operator-facing settings with their current values.

@@ -196,7 +196,7 @@ func TestErrorBodyCarriesCode(t *testing.T) {
 			c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", tc.contentTyp)
 				w.WriteHeader(tc.status)
-				io.WriteString(w, tc.body)
+				_, _ = io.WriteString(w, tc.body)
 			})
 			_, err := fast(c).GetIssue("TSK-9")
 			var apiErr *APIError
