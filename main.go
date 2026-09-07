@@ -18,7 +18,7 @@ import (
 	"github.com/mikedclarke/trackd/internal/store"
 )
 
-var version = "dev"
+const version = "0.1.1"
 
 func main() {
 	err := run(os.Args[1:])

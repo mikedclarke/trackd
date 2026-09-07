@@ -6,3 +6,6 @@
 dist/
 .DS_Store
 /bin/
+
+# Internal release runbook (public repo keeps the CHANGELOG, not our ops)
+RELEASING.md

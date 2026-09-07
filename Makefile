@@ -1,25 +1,17 @@
 BIN := bin/trackd
 PREFIX ?= $(HOME)/.local
-VERSION = $(shell git describe --always --dirty 2>/dev/null || echo dev)
+# The version is the single const in main.go, bumped by hand at release time
+# (see the release runbook). No git-describe, so `trackd version` is always a
+# clean SemVer, never a commit-dirtied string.
+VERSION = $(shell sed -n 's/^const version = "\(.*\)"/\1/p' main.go)
 
 .PHONY: all build test lint install clean version dist
 
 all: build
 
-# A release binary must be traceable to a commit, so a build refuses a tree
-# with uncommitted changes. ALLOW_DIRTY=1 is the escape hatch for local work.
 build:
-	@v="$(VERSION)"; \
-	case "$$v" in \
-	  *-dirty) \
-	    if [ "$(ALLOW_DIRTY)" != "1" ]; then \
-	      echo "refusing to build from a dirty tree ($$v); commit first or set ALLOW_DIRTY=1" >&2; \
-	      exit 1; \
-	    fi; \
-	    echo "building from a dirty tree ($$v)" >&2 ;; \
-	esac; \
-	mkdir -p $(dir $(BIN)); \
-	go build -ldflags "-X main.version=$$v" -o $(BIN) .
+	@mkdir -p $(dir $(BIN))
+	go build -o $(BIN) .
 	@echo "built $(BIN) $$($(BIN) version)"
 
 test:
@@ -49,19 +41,20 @@ version:
 	@echo $(VERSION)
 
 # Release archives for every supported platform, plus a checksum file, in
-# dist/. Same rules as build: the tree must be clean so the version is real.
+# dist/. A release must be traceable to a commit, so the tree must be clean
+# (ALLOW_DIRTY=1 is the local escape hatch).
 dist:
+	@if [ -n "$$(git status --porcelain)" ] && [ "$(ALLOW_DIRTY)" != "1" ]; then \
+	  echo "refusing to build a release from a dirty tree; commit first or set ALLOW_DIRTY=1" >&2; exit 1; \
+	fi
 	@v="$(VERSION)"; \
-	case "$$v" in *-dirty) \
-	  if [ "$(ALLOW_DIRTY)" != "1" ]; then echo "refusing to build from a dirty tree ($$v)" >&2; exit 1; fi ;; \
-	esac; \
 	rm -rf dist && mkdir -p dist; \
 	for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do \
 	  os=$${target%/*}; arch=$${target#*/}; \
 	  name="trackd_$${v}_$${os}_$${arch}"; ext=""; \
 	  [ "$$os" = windows ] && ext=".exe"; \
 	  mkdir -p "dist/$$name"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w -X main.version=$$v" -o "dist/$$name/trackd$$ext" . || exit 1; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "-s -w" -o "dist/$$name/trackd$$ext" . || exit 1; \
 	  cp README.md LICENSE "dist/$$name/"; \
 	  if [ "$$os" = windows ]; then (cd dist && zip -qr "$$name.zip" "$$name"); else tar -C dist -czf "dist/$$name.tar.gz" "$$name"; fi; \
 	  rm -rf "dist/$$name"; \
