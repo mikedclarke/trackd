@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -33,7 +35,7 @@ func addCommon(fs *flag.FlagSet) *commonFlags {
 	}
 }
 
-func (c *commonFlags) client() *client.Client {
+func (c *commonFlags) client() (*client.Client, error) {
 	base := *c.url
 	if base == "" {
 		base = os.Getenv("TRACKD_URL")
@@ -45,7 +47,17 @@ func (c *commonFlags) client() *client.Client {
 	if token == "" {
 		token = os.Getenv("TRACKD_TOKEN")
 	}
-	return client.New(base, token)
+	if token == "" {
+		// Catch the common "forgot to authenticate" case here rather than
+		// after a wasted round-trip. Reusing APIError keeps the exit code (4)
+		// and the "unauthorized" machine code identical to a server 401.
+		return nil, &client.APIError{
+			Status:  http.StatusUnauthorized,
+			Code:    "unauthorized",
+			Message: "no API token set (set $TRACKD_TOKEN or pass --token)",
+		}
+	}
+	return client.New(base, token), nil
 }
 
 // usageError is a mistake in the command line rather than a failure at the
@@ -56,6 +68,23 @@ func (e *usageError) Error() string { return e.msg }
 
 func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
+}
+
+// issueKeyRe matches an issue key like GDL-742. It is prefix-agnostic so it
+// works whatever issue_prefix a server is configured with.
+var issueKeyRe = regexp.MustCompile(`^[A-Z]+-\d+$`)
+
+// oneOf returns the non-empty value of two flags that mean the same thing (a
+// primary name and an alias), or a usage error if both are set. Empty is a
+// valid result: the caller still enforces "required".
+func oneOf(n1, v1, n2, v2 string) (string, error) {
+	if v1 != "" && v2 != "" {
+		return "", usagef("--%s and --%s are the same thing; pass one", n1, n2)
+	}
+	if v1 != "" {
+		return v1, nil
+	}
+	return v2, nil
 }
 
 // groupUsage handles a command group (issue, project, token, ...) called with
@@ -277,7 +306,11 @@ func issueList(args []string) error {
 	case *archived:
 		q.Archived = "true"
 	}
-	issues, next, err := common.client().ListIssues(q)
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	issues, next, err := cl.ListIssues(q)
 	if err != nil {
 		return err
 	}
@@ -307,7 +340,10 @@ func issueShow(args []string) error {
 		return err
 	}
 	key := lead[0]
-	c := common.client()
+	c, err := common.client()
+	if err != nil {
+		return err
+	}
 	issue, err := c.GetIssue(key)
 	if err != nil {
 		return err
@@ -385,7 +421,11 @@ func issueCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	issue, err := common.client().CreateIssue(client.IssueCreate{
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	issue, err := cl.CreateIssue(client.IssueCreate{
 		Title: *title, Description: desc, Status: *status, Priority: *priority,
 		Project: *project, Parent: *parent, Assignee: *assignee, Milestone: *milestone,
 		DueDate: *due, Labels: labels, Actor: *actor, IdempotencyKey: *idempotencyKey,
@@ -435,7 +475,10 @@ func issueUpdate(args []string) error {
 	}
 	set := setFlags(fs)
 	key := lead[0]
-	c := common.client()
+	c, err := common.client()
+	if err != nil {
+		return err
+	}
 
 	patch := client.IssuePatch{Actor: *actor, ReplaceDescription: *replaceDescription}
 	if set["title"] {
@@ -559,19 +602,28 @@ func issueAppend(args []string) error {
 	fs := flag.NewFlagSet("issue append", flag.ContinueOnError)
 	common := addCommon(fs)
 	text := fs.String("text", "", "text to add to the end of the description; use - to read stdin")
+	bodyAlias := fs.String("body", "", "alias for --text")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
 	lead, err := parseArgs(fs, args, 1, "trackd issue append <key> --text <text>")
 	if err != nil {
 		return err
 	}
-	if *text == "" {
-		return usagef("usage: trackd issue append <key> --text <text>")
-	}
-	body, err := readValue("text", *text)
+	raw, err := oneOf("text", *text, "body", *bodyAlias)
 	if err != nil {
 		return err
 	}
-	issue, err := common.client().AppendDescription(lead[0], body, *actor)
+	if raw == "" {
+		return usagef("usage: trackd issue append <key> --text <text>")
+	}
+	body, err := readValue("text", raw)
+	if err != nil {
+		return err
+	}
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	issue, err := cl.AppendDescription(lead[0], body, *actor)
 	if err != nil {
 		return err
 	}
@@ -582,6 +634,7 @@ func issueComment(args []string) error {
 	fs := flag.NewFlagSet("issue comment", flag.ContinueOnError)
 	common := addCommon(fs)
 	bodyFlag := fs.String("body", "", "comment body (required); use - to read stdin")
+	textAlias := fs.String("text", "", "alias for --body")
 	parent := fs.Int64("parent", 0, "reply to this comment id")
 	idempotencyKey := fs.String("idempotency-key", "", "repeat-safe key: a second comment with the same key returns the first")
 	actor := fs.String("actor", "", "actor recorded on the comment (default: token name)")
@@ -589,14 +642,22 @@ func issueComment(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *bodyFlag == "" {
-		return usagef("usage: trackd issue comment <key> --body <text> [flags]")
-	}
-	text, err := readValue("body", *bodyFlag)
+	raw, err := oneOf("body", *bodyFlag, "text", *textAlias)
 	if err != nil {
 		return err
 	}
-	comment, err := common.client().AddComment(lead[0], client.CommentCreate{
+	if raw == "" {
+		return usagef("usage: trackd issue comment <key> --body <text> [flags]")
+	}
+	text, err := readValue("body", raw)
+	if err != nil {
+		return err
+	}
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	comment, err := cl.AddComment(lead[0], client.CommentCreate{
 		Body: text, ParentID: *parent, Actor: *actor, IdempotencyKey: *idempotencyKey,
 	})
 	if err != nil {
@@ -615,11 +676,18 @@ func cmdComment(args []string) error {
 	}
 	sub, rest := args[0], args[1:]
 	if sub != "edit" {
+		// A bare issue key here is almost always someone reaching for the
+		// nested command; point them at it instead of a blank "unknown
+		// subcommand".
+		if issueKeyRe.MatchString(sub) {
+			return usagef("to comment on an issue use: trackd issue comment %s --body <text>", sub)
+		}
 		return usagef("unknown comment subcommand %q", sub)
 	}
 	fs := flag.NewFlagSet("comment edit", flag.ContinueOnError)
 	common := addCommon(fs)
 	bodyFlag := fs.String("body", "", "replacement body (required); use - to read stdin")
+	textAlias := fs.String("text", "", "alias for --body")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
 	lead, err := parseArgs(fs, rest, 1, "trackd comment edit <id> --body <text> [flags]")
 	if err != nil {
@@ -629,14 +697,22 @@ func cmdComment(args []string) error {
 	if err != nil {
 		return usagef("comment id must be a number, got %q", lead[0])
 	}
-	if *bodyFlag == "" {
-		return usagef("usage: trackd comment edit <id> --body <text> [flags]")
-	}
-	text, err := readValue("body", *bodyFlag)
+	raw, err := oneOf("body", *bodyFlag, "text", *textAlias)
 	if err != nil {
 		return err
 	}
-	comment, err := common.client().UpdateComment(id, text, *actor)
+	if raw == "" {
+		return usagef("usage: trackd comment edit <id> --body <text> [flags]")
+	}
+	text, err := readValue("body", raw)
+	if err != nil {
+		return err
+	}
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	comment, err := cl.UpdateComment(id, text, *actor)
 	if err != nil {
 		return err
 	}
@@ -657,7 +733,11 @@ func issueRelate(args []string) error {
 	if err != nil {
 		return err
 	}
-	relations, err := common.client().SaveRelation(lead[0], lead[1], *typ, *remove, *actor)
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	relations, err := cl.SaveRelation(lead[0], lead[1], *typ, *remove, *actor)
 	if err != nil {
 		return err
 	}
@@ -681,7 +761,11 @@ func issueEvents(args []string) error {
 	if err != nil {
 		return err
 	}
-	events, err := common.client().ListIssueEvents(lead[0], *limit)
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	events, err := cl.ListIssueEvents(lead[0], *limit)
 	if err != nil {
 		return err
 	}
@@ -703,7 +787,11 @@ func cmdEvents(args []string) error {
 	if err := parseFlags(fs, args, "trackd events [flags]"); err != nil {
 		return err
 	}
-	events, next, err := common.client().ListEvents(client.EventQuery{
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	events, next, err := cl.ListEvents(client.EventQuery{
 		Since: *since, AfterID: *afterID, Entity: *entity, Limit: *limit,
 	})
 	if err != nil {
@@ -763,7 +851,11 @@ func projectList(args []string) error {
 	if err := parseFlags(fs, args, "trackd project list [flags]"); err != nil {
 		return err
 	}
-	projects, err := common.client().ListProjects(*archived)
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	projects, err := cl.ListProjects(*archived)
 	if err != nil {
 		return err
 	}
@@ -786,7 +878,11 @@ func projectShow(args []string) error {
 	if err != nil {
 		return err
 	}
-	project, err := common.client().GetProject(lead[0])
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	project, err := cl.GetProject(lead[0])
 	if err != nil {
 		return err
 	}
@@ -825,7 +921,11 @@ func projectCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	project, err := common.client().CreateProject(client.ProjectCreate{
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	project, err := cl.CreateProject(client.ProjectCreate{
 		Name: *name, Slug: *slug, Description: desc, Status: *status,
 		Labels: labels, StartDate: *start, TargetDate: *target, Actor: *actor,
 	})
@@ -920,7 +1020,11 @@ func projectUpdate(args []string) error {
 		no := false
 		patch.Archived = &no
 	}
-	project, err := common.client().UpdateProject(lead[0], patch)
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	project, err := cl.UpdateProject(lead[0], patch)
 	if err != nil {
 		return err
 	}
@@ -943,7 +1047,11 @@ func cmdLabel(args []string) error {
 		if err := parseFlags(fs, rest, "trackd label list [flags]"); err != nil {
 			return err
 		}
-		labels, err := common.client().ListLabels()
+		cl, err := common.client()
+		if err != nil {
+			return err
+		}
+		labels, err := cl.ListLabels()
 		if err != nil {
 			return err
 		}
@@ -964,7 +1072,11 @@ func cmdLabel(args []string) error {
 		if err != nil {
 			return err
 		}
-		label, err := common.client().CreateLabel(lead[0], *color)
+		cl, err := common.client()
+		if err != nil {
+			return err
+		}
+		label, err := cl.CreateLabel(lead[0], *color)
 		if err != nil {
 			return err
 		}
@@ -992,7 +1104,11 @@ func cmdMilestone(args []string) error {
 		if err := parseFlags(fs, rest, "trackd milestone list [flags]"); err != nil {
 			return err
 		}
-		milestones, err := common.client().ListMilestones(*project, *archived)
+		cl, err := common.client()
+		if err != nil {
+			return err
+		}
+		milestones, err := cl.ListMilestones(*project, *archived)
 		if err != nil {
 			return err
 		}
@@ -1016,7 +1132,11 @@ func cmdMilestone(args []string) error {
 		if err := parseFlags(fs, rest, "trackd milestone create --project <slug> --name <name> [flags]"); err != nil {
 			return err
 		}
-		milestone, err := common.client().CreateMilestone(client.MilestoneCreate{
+		cl, err := common.client()
+		if err != nil {
+			return err
+		}
+		milestone, err := cl.CreateMilestone(client.MilestoneCreate{
 			Project: *project, Name: *name, Description: *description, TargetDate: *target, Actor: *actor,
 		})
 		if err != nil {
@@ -1076,7 +1196,11 @@ func cmdMilestone(args []string) error {
 			no := false
 			patch.Archived = &no
 		}
-		milestone, err := common.client().UpdateMilestone(lead[0], patch)
+		cl, err := common.client()
+		if err != nil {
+			return err
+		}
+		milestone, err := cl.UpdateMilestone(lead[0], patch)
 		if err != nil {
 			return err
 		}
@@ -1096,7 +1220,11 @@ func cmdStatuses(args []string) error {
 	if err := parseFlags(fs, args, "trackd statuses [flags]"); err != nil {
 		return err
 	}
-	statuses, err := common.client().ListStatuses()
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	statuses, err := cl.ListStatuses()
 	if err != nil {
 		return err
 	}
@@ -1117,7 +1245,11 @@ func cmdHealth(args []string) error {
 	if err := parseFlags(fs, args, "trackd health [flags]"); err != nil {
 		return err
 	}
-	health, status, err := common.client().Health()
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	health, status, err := cl.Health()
 	if err != nil {
 		return err
 	}

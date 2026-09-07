@@ -160,7 +160,7 @@ Everything is under `/api/v1` with bearer auth. Issues, comments, relations, pro
 
 ### CLI
 
-`trackd issue|comment|events|project|milestone|label|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 2 usage, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. Details in [docs/CLI.md](docs/CLI.md).
+`trackd issue|comment|events|project|milestone|label|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 2 usage, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. On the body-bearing commands (`issue append`, `issue comment`, `comment edit`) `--text` and `--body` are interchangeable. Details in [docs/CLI.md](docs/CLI.md).
 
 ### MCP
 

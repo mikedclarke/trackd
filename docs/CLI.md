@@ -22,6 +22,9 @@ Two rules protect a field from an empty shell variable:
   `--clear-assignee`, `--clear-milestone`, `--clear-due`.
 - `--description -`, `--body -` and `--text -` read stdin, and fail when stdin is
   empty rather than writing nothing over something.
+- `--text` and `--body` are interchangeable on the body-bearing commands:
+  `issue append`, `issue comment` and `comment edit` all accept either name.
+  Passing both at once is a usage error.
 
 ## Exit codes and retries
 

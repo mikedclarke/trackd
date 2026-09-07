@@ -329,3 +329,91 @@ func TestSplitCSV(t *testing.T) {
 		}
 	}
 }
+
+// oneOf backs the --text/--body aliases: either name works, but naming the same
+// thing twice is a usage error rather than a silent pick.
+func TestOneOf(t *testing.T) {
+	if v, err := oneOf("text", "hi", "body", ""); err != nil || v != "hi" {
+		t.Errorf("primary only = %q, %v", v, err)
+	}
+	if v, err := oneOf("text", "", "body", "hi"); err != nil || v != "hi" {
+		t.Errorf("alias only = %q, %v", v, err)
+	}
+	if v, err := oneOf("text", "", "body", ""); err != nil || v != "" {
+		t.Errorf("neither = %q, %v (required is enforced by the caller)", v, err)
+	}
+	v, err := oneOf("text", "a", "body", "b")
+	var usage *usageError
+	if !errors.As(err, &usage) || v != "" {
+		t.Errorf("both set = %q, %v, want a usage error", v, err)
+	}
+	if !strings.Contains(err.Error(), "text") || !strings.Contains(err.Error(), "body") {
+		t.Errorf("both-set message = %q, want it to name both flags", err.Error())
+	}
+}
+
+// `trackd comment GDL-1` is almost always someone reaching for the nested
+// `issue comment`; the error points them there instead of a blank "unknown
+// subcommand". A non-key subcommand still gets the plain error.
+func TestCommentIssueKeyHint(t *testing.T) {
+	err := cmdComment([]string{"GDL-1"})
+	var usage *usageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("comment GDL-1 = %v, want a usage error", err)
+	}
+	if !strings.Contains(err.Error(), "trackd issue comment GDL-1") {
+		t.Errorf("hint = %q, want it to point at `trackd issue comment`", err.Error())
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("exit code = %d, want 2", exitCode(err))
+	}
+
+	err = cmdComment([]string{"nope"})
+	if !errors.As(err, &usage) || !strings.Contains(err.Error(), "unknown comment subcommand") {
+		t.Errorf("comment nope = %v, want the plain unknown-subcommand error", err)
+	}
+}
+
+// A missing token is caught locally, before any request, and reported with the
+// same exit 4 / "unauthorized" a server 401 would give.
+func TestClientRequiresToken(t *testing.T) {
+	t.Setenv("TRACKD_TOKEN", "")
+	t.Setenv("TRACKD_URL", "")
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	common := addCommon(fs)
+	if _, err := parseArgs(fs, nil, 0, "t"); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	_, err := common.client()
+	if err == nil {
+		t.Fatal("client() with no token = nil error, want an auth error")
+	}
+	if exitCode(err) != 4 {
+		t.Errorf("exit code = %d, want 4", exitCode(err))
+	}
+	obj := errorObject(err)
+	if obj["code"] != "unauthorized" || obj["exit"] != 4 {
+		t.Errorf("error object = %v", obj)
+	}
+
+	t.Setenv("TRACKD_TOKEN", "td_test")
+	if _, err := common.client(); err != nil {
+		t.Errorf("client() with a token = %v, want nil", err)
+	}
+}
+
+// The admin/server commands parse through parseSet too, so an unknown flag on
+// them is a usage error (exit 2), not the exit-1 "trackd broke" bucket.
+func TestAdminUndefinedFlagIsUsage(t *testing.T) {
+	err := cmdSetting([]string{"list", "--bogus"})
+	var usage *usageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("setting list --bogus = %v, want a usage error", err)
+	}
+	if exitCode(err) != 2 {
+		t.Errorf("exit code = %d, want 2", exitCode(err))
+	}
+	if obj := errorObject(err); obj["code"] != "usage" || obj["exit"] != 2 {
+		t.Errorf("error object = %v", obj)
+	}
+}

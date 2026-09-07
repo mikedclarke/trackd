@@ -135,7 +135,7 @@ func cmdServe(args []string) error {
 	backupEvery := fs.Duration("backup-every", 24*time.Hour, "interval between scheduled backups")
 	backupKeep := fs.Int("backup-keep", 14, "scheduled backups to retain (0 = never prune)")
 	backupTimeout := fs.Duration("backup-timeout", 10*time.Minute, "abandon a backup run that exceeds this")
-	if err := fs.Parse(args); err != nil {
+	if err := parseSet(fs, args); err != nil {
 		return err
 	}
 	// The pre-migration snapshot belongs with the other backups when there is
@@ -207,7 +207,7 @@ func cmdToken(args []string) error {
 	fs := flag.NewFlagSet("token "+sub, flag.ContinueOnError)
 	db := fs.String("db", defaultDB(), "database path")
 	role := fs.String("role", "agent", "token role: agent or admin (add only)")
-	if err := fs.Parse(rest); err != nil {
+	if err := parseSet(fs, rest); err != nil {
 		return err
 	}
 	switch sub {
@@ -269,7 +269,7 @@ func cmdBackup(args []string) error {
 	db := fs.String("db", defaultDB(), "database path")
 	to := fs.String("to", "backups", "snapshot directory")
 	keep := fs.Int("keep", 0, "prune all but the newest N snapshots (0 = never prune)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseSet(fs, args); err != nil {
 		return err
 	}
 	// Read-only: a snapshot of a database a server is serving is the normal
@@ -299,7 +299,7 @@ func cmdBackup(args []string) error {
 func cmdRestore(args []string) error {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	db := fs.String("db", defaultDB(), "destination database path (must not exist)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseSet(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -332,7 +332,7 @@ func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	db := fs.String("db", defaultDB(), "database path")
 	out := fs.String("out", "", "output file (default stdout)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseSet(fs, args); err != nil {
 		return err
 	}
 	// Read-only: exporting a database a server is serving is the normal case.
@@ -361,7 +361,7 @@ func cmdImport(args []string) error {
 	db := fs.String("db", defaultDB(), "database path (must be new or empty)")
 	actor := fs.String("actor", "linear-import", "actor recorded on imported issues (linear only)")
 	dryRun := fs.Bool("dry-run", false, "parse and validate, report counts, write nothing (linear only)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseSet(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
@@ -461,7 +461,7 @@ func cmdSetting(args []string) error {
 	db := fs.String("db", defaultDB(), "database path")
 	jsonOut := fs.Bool("json", false, "machine-readable output")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (set only; default cli)")
-	if err := fs.Parse(rest); err != nil {
+	if err := parseSet(fs, rest); err != nil {
 		return err
 	}
 	switch sub {
