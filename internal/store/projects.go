@@ -19,15 +19,16 @@ var projectStatuses = map[string]bool{
 }
 
 func (s *Store) CreateProject(in ProjectInput, actor string) (*Project, error) {
-	if strings.TrimSpace(in.Name) == "" {
-		return nil, errors.New("project name is required")
+	name, err := validTitle("project name", in.Name)
+	if err != nil {
+		return nil, err
 	}
 	slug := in.Slug
 	if slug == "" {
-		slug = slugify(in.Name)
+		slug = slugify(name)
 	}
 	if slug == "" {
-		return nil, fmt.Errorf("cannot derive a slug from %q", in.Name)
+		return nil, fmt.Errorf("cannot derive a slug from %q", name)
 	}
 	status := in.Status
 	if status == "" {
@@ -44,8 +45,8 @@ func (s *Store) CreateProject(in ProjectInput, actor string) (*Project, error) {
 		return nil, fmt.Errorf("target date: %w", err)
 	}
 	var out *Project
-	err := s.tx(func(tx *sql.Tx) error {
-		if err := projectNameFree(tx, in.Name, 0); err != nil {
+	err = s.tx(func(tx *sql.Tx) error {
+		if err := projectNameFree(tx, name, 0); err != nil {
 			return err
 		}
 		var taken int64
@@ -67,7 +68,7 @@ func (s *Store) CreateProject(in ProjectInput, actor string) (*Project, error) {
 		}
 		res, err := tx.Exec(
 			"INSERT INTO projects (name, slug, description, status, start_date, target_date, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			in.Name, slug, in.Description, status, nullable(in.StartDate), nullable(in.TargetDate), ts, ts, completedAt,
+			name, slug, in.Description, status, nullable(in.StartDate), nullable(in.TargetDate), ts, ts, completedAt,
 		)
 		if err != nil {
 			return err
@@ -124,13 +125,14 @@ func (s *Store) UpdateProject(slug string, p ProjectPatch, actor string) (*Proje
 		sets := []string{"updated_at = ?"}
 		args := []any{now()}
 		if p.Name != nil {
-			if strings.TrimSpace(*p.Name) == "" {
-				return errors.New("project name is required")
-			}
-			if err := projectNameFree(tx, *p.Name, before.ID); err != nil {
+			name, err := validTitle("project name", *p.Name)
+			if err != nil {
 				return err
 			}
-			sets, args = append(sets, "name = ?"), append(args, *p.Name)
+			if err := projectNameFree(tx, name, before.ID); err != nil {
+				return err
+			}
+			sets, args = append(sets, "name = ?"), append(args, name)
 		}
 		if p.Description != nil {
 			sets, args = append(sets, "description = ?"), append(args, *p.Description)

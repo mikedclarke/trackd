@@ -8,8 +8,9 @@ import (
 )
 
 func (s *Store) CreateMilestone(in MilestoneInput, actor string) (*Milestone, error) {
-	if strings.TrimSpace(in.Name) == "" {
-		return nil, errors.New("milestone name is required")
+	name, err := validTitle("milestone name", in.Name)
+	if err != nil {
+		return nil, err
 	}
 	if in.Project == "" {
 		return nil, errors.New("milestone project is required")
@@ -18,7 +19,7 @@ func (s *Store) CreateMilestone(in MilestoneInput, actor string) (*Milestone, er
 		return nil, fmt.Errorf("target date: %w", err)
 	}
 	var out *Milestone
-	err := s.tx(func(tx *sql.Tx) error {
+	err = s.tx(func(tx *sql.Tx) error {
 		projectID, err := optionalProjectID(tx, in.Project)
 		if err != nil {
 			return err
@@ -27,11 +28,11 @@ func (s *Store) CreateMilestone(in MilestoneInput, actor string) (*Milestone, er
 		res, err := tx.Exec(`
 			INSERT INTO milestones (project_id, name, description, target_date, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?)`,
-			projectID, in.Name, in.Description, nullable(in.TargetDate), ts, ts,
+			projectID, name, in.Description, nullable(in.TargetDate), ts, ts,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
-				return fmt.Errorf("milestone %q already exists in project %s: %w", in.Name, in.Project, ErrConflict)
+				return fmt.Errorf("milestone %q already exists in project %s: %w", name, in.Project, ErrConflict)
 			}
 			return err
 		}
@@ -73,10 +74,11 @@ func (s *Store) UpdateMilestone(id int64, p MilestonePatch, actor string) (*Mile
 		sets := []string{"updated_at = ?"}
 		args := []any{now()}
 		if p.Name != nil {
-			if strings.TrimSpace(*p.Name) == "" {
-				return errors.New("milestone name is required")
+			name, err := validTitle("milestone name", *p.Name)
+			if err != nil {
+				return err
 			}
-			sets, args = append(sets, "name = ?"), append(args, *p.Name)
+			sets, args = append(sets, "name = ?"), append(args, name)
 		}
 		if p.Description != nil {
 			sets, args = append(sets, "description = ?"), append(args, *p.Description)

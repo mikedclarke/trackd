@@ -353,10 +353,27 @@ func TestMCPSaveRelation(t *testing.T) {
 	if len(out.Relations) != 0 {
 		t.Errorf("after remove = %+v", out)
 	}
+	if out.Removed == nil || !*out.Removed {
+		t.Errorf("removed = %v, want true", out.Removed)
+	}
+	// Removing again is the same state, so it succeeds and says there was
+	// nothing there.
+	out = mcpRelationsOut{}
+	callTool(t, session, "save_relation", map[string]any{
+		"key": "TSK-1", "related": "TSK-2", "type": "blocks", "remove": true,
+	}, &out)
+	if out.Removed == nil || *out.Removed {
+		t.Errorf("second removed = %v, want false", out.Removed)
+	}
 	if msg := callErr(t, session, "save_relation", map[string]any{
 		"key": "TSK-1", "related": "TSK-2", "type": "sideways",
 	}); msg == "" {
 		t.Error("unknown relation type was accepted")
+	}
+	if msg := callErr(t, session, "save_relation", map[string]any{
+		"key": "TSK-1", "related": "TSK-2", "type": "sideways", "remove": true,
+	}); msg == "" {
+		t.Error("unknown relation type was accepted on a removal")
 	}
 }
 

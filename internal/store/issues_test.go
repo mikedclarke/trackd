@@ -385,7 +385,7 @@ func TestRelationsTouchBothIssues(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE issues SET updated_at = ?", stale); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RemoveRelation(a.Key, b.Key, "blocks", "pm"); err != nil {
+	if _, err := s.RemoveRelation(a.Key, b.Key, "blocks", "pm"); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{a.Key, b.Key} {

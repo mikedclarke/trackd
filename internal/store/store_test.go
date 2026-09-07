@@ -244,11 +244,23 @@ func TestCommentsAndRelations(t *testing.T) {
 	if rels[0].IssueKey != a.Key || rels[0].Type != "blocks" {
 		t.Errorf("relation = %+v", rels[0])
 	}
-	if err := s.RemoveRelation(a.Key, b.Key, "blocks", ""); err != nil {
-		t.Fatal(err)
+	removed, err := s.RemoveRelation(a.Key, b.Key, "blocks", "")
+	if err != nil || !removed {
+		t.Fatalf("first remove = %v, %v, want true", removed, err)
 	}
-	if err := s.RemoveRelation(a.Key, b.Key, "blocks", ""); !errors.Is(err, ErrNotFound) {
-		t.Errorf("second remove = %v, want ErrNotFound", err)
+	// Removal is idempotent: the second call reports there was nothing there
+	// rather than failing, so a retry is safe.
+	removed, err = s.RemoveRelation(a.Key, b.Key, "blocks", "")
+	if err != nil || removed {
+		t.Errorf("second remove = %v, %v, want false and no error", removed, err)
+	}
+	// A relation type that does not exist is still a typo, not a state.
+	if _, err := s.RemoveRelation(a.Key, b.Key, "nonsense", ""); err == nil {
+		t.Error("removing an unknown relation type was accepted")
+	}
+	// A key that does not exist is still not found.
+	if _, err := s.RemoveRelation(a.Key, "TSK-999", "blocks", ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("removing against a missing issue = %v, want ErrNotFound", err)
 	}
 }
 
@@ -377,5 +389,89 @@ func TestMigrationSnapshot(t *testing.T) {
 	issue, err := snap.GetIssue("TSK-1")
 	if err != nil || issue.Title != "survives" {
 		t.Fatalf("snapshot data: %+v, %v", issue, err)
+	}
+}
+
+// D7: the one-line naming fields are validated the same way everywhere. An
+// empty or whitespace-only name and a name past the length cap are both
+// ErrInvalidRef, on create and on update alike, and what is stored is trimmed.
+func TestTitleValidation(t *testing.T) {
+	long := strings.Repeat("a", maxTitleLength+1)
+	atCap := strings.Repeat("b", maxTitleLength)
+
+	cases := []struct {
+		name    string
+		title   string
+		wantErr bool
+	}{
+		{"empty", "", true},
+		{"whitespace only", "   \t\n ", true},
+		{"over the cap", long, true},
+		{"at the cap", atCap, false},
+		{"ordinary", "  a real title  ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := strings.TrimSpace(tc.title)
+
+			// Creates and updates run against separate stores: project and
+			// milestone names are unique, so a create of the name under test
+			// would make the update of the same name a conflict.
+			s, holder := titleFixture(t)
+			issue, _, err := s.CreateIssue(IssueInput{Title: tc.title}, "pm")
+			checkTitle(t, "issue create", err, tc.wantErr, want, func() string { return issue.Title })
+
+			created, err := s.CreateProject(ProjectInput{Name: tc.title, Slug: "other"}, "pm")
+			checkTitle(t, "project create", err, tc.wantErr, want, func() string { return created.Name })
+
+			made, err := s.CreateMilestone(MilestoneInput{Project: holder.Slug, Name: tc.title}, "pm")
+			checkTitle(t, "milestone create", err, tc.wantErr, want, func() string { return made.Name })
+
+			u, uHolder := titleFixture(t)
+			seed := mustCreateIssue(t, u, IssueInput{Title: "seed"}, "pm")
+			milestone, err := u.CreateMilestone(MilestoneInput{Project: uHolder.Slug, Name: "seed"}, "pm")
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated, err := u.UpdateIssue(seed.Key, IssuePatch{Title: &tc.title}, "pm")
+			checkTitle(t, "issue update", err, tc.wantErr, want, func() string { return updated.Title })
+
+			renamed, err := u.UpdateProject(uHolder.Slug, ProjectPatch{Name: &tc.title}, "pm")
+			checkTitle(t, "project update", err, tc.wantErr, want, func() string { return renamed.Name })
+
+			moved, err := u.UpdateMilestone(milestone.ID, MilestonePatch{Name: &tc.title}, "pm")
+			checkTitle(t, "milestone update", err, tc.wantErr, want, func() string { return moved.Name })
+		})
+	}
+}
+
+// titleFixture is a fresh store with one project for a milestone to hang off.
+func titleFixture(t *testing.T) (*Store, *Project) {
+	t.Helper()
+	s := openTestStore(t)
+	project, err := s.CreateProject(ProjectInput{Name: "Holder"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, project
+}
+
+// checkTitle asserts one call of TestTitleValidation: the error class when the
+// title is bad, and the trimmed stored value when it is good. stored is a
+// closure because reading it is only safe once the error has been checked.
+func checkTitle(t *testing.T, what string, err error, wantErr bool, want string, stored func() string) {
+	t.Helper()
+	if wantErr {
+		if !errors.Is(err, ErrInvalidRef) {
+			t.Errorf("%s = %v, want ErrInvalidRef", what, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Errorf("%s = %v, want no error", what, err)
+		return
+	}
+	if got := stored(); got != want {
+		t.Errorf("%s stored %q, want the trimmed %q", what, got, want)
 	}
 }

@@ -277,19 +277,21 @@ func (c *Client) ListRelations(key string) ([]store.Relation, error) {
 }
 
 // SaveRelation adds or removes one relation and returns the issue's relations
-// as they stand afterwards.
-func (c *Client) SaveRelation(key, related, typ string, remove bool, actor string) ([]store.Relation, error) {
+// as they stand afterwards. On a removal the second result says whether there
+// was a relation to remove: removal is idempotent, so false is a success.
+func (c *Client) SaveRelation(key, related, typ string, remove bool, actor string) ([]store.Relation, bool, error) {
 	body := map[string]any{"related": related, "type": typ, "remove": remove}
 	if actor != "" {
 		body["actor"] = actor
 	}
 	var env struct {
 		Relations []store.Relation `json:"relations"`
+		Removed   bool             `json:"removed"`
 	}
 	if err := c.Do("POST", "/api/v1/issues/"+url.PathEscape(key)+"/relations", nil, body, &env); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return env.Relations, nil
+	return env.Relations, env.Removed, nil
 }
 
 // EventQuery is the filter set of the activity feed. AfterID is the cursor: it

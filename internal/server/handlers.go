@@ -360,6 +360,9 @@ func (s *Server) handlePatchComment(w http.ResponseWriter, r *http.Request) {
 
 type relationListResponse struct {
 	Relations []store.Relation `json:"relations"`
+	// Removed answers a removal only, and says whether there was a relation
+	// there to remove. Removal is idempotent, so false is still a 200.
+	Removed *bool `json:"removed,omitempty"`
 }
 
 func (s *Server) handleListRelations(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +371,7 @@ func (s *Server) handleListRelations(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err)
 		return
 	}
-	s.writeRelations(w, r, relations)
+	s.writeRelations(w, r, relations, nil)
 }
 
 type relationReq struct {
@@ -379,7 +382,9 @@ type relationReq struct {
 }
 
 // handleSetRelation adds or removes a relation. Removal rides on POST with
-// {"remove": true}: the API keeps its no-DELETE-endpoints guarantee.
+// {"remove": true}: the API keeps its no-DELETE-endpoints guarantee. A removal
+// that found nothing to remove is a 200 with "removed": false, because the
+// caller's goal is the state, and that state is already reached.
 func (s *Server) handleSetRelation(w http.ResponseWriter, r *http.Request) {
 	var req relationReq
 	if err := decodeBody(w, r, &req); err != nil {
@@ -388,9 +393,12 @@ func (s *Server) handleSetRelation(w http.ResponseWriter, r *http.Request) {
 	}
 	key := r.PathValue("key")
 	act := actor(r, req.Actor)
+	var removed *bool
 	var err error
 	if req.Remove {
-		err = s.store.RemoveRelation(key, req.Related, req.Type, act)
+		var gone bool
+		gone, err = s.store.RemoveRelation(key, req.Related, req.Type, act)
+		removed = &gone
 	} else {
 		err = s.store.AddRelation(key, req.Related, req.Type, act)
 	}
@@ -403,14 +411,14 @@ func (s *Server) handleSetRelation(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err)
 		return
 	}
-	s.writeRelations(w, r, relations)
+	s.writeRelations(w, r, relations, removed)
 }
 
-func (s *Server) writeRelations(w http.ResponseWriter, _ *http.Request, relations []store.Relation) {
+func (s *Server) writeRelations(w http.ResponseWriter, _ *http.Request, relations []store.Relation, removed *bool) {
 	if relations == nil {
 		relations = []store.Relation{}
 	}
-	writeJSON(w, http.StatusOK, relationListResponse{Relations: relations})
+	writeJSON(w, http.StatusOK, relationListResponse{Relations: relations, Removed: removed})
 }
 
 type eventListResponse struct {

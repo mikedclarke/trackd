@@ -5,9 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// hexColor is the only color form a label may carry: #rgb or #rrggbb, in
+// either case. A label is a UI affordance, so a value the UI cannot render is
+// worth refusing at the door rather than storing and drawing as nothing.
+var hexColor = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
+
+// validColor accepts an empty color, which means "leave the label's color
+// alone", and any hex color. Anything else is ErrInvalidRef.
+func validColor(color string) error {
+	if color == "" || hexColor.MatchString(color) {
+		return nil
+	}
+	return fmt.Errorf("label color %q must be a hex color like #f00 or #ff0000: %w", color, ErrInvalidRef)
+}
 
 func (s *Store) ListLabels() ([]Label, error) {
 	rows, err := s.db.Query("SELECT id, name, color FROM labels ORDER BY name")
@@ -32,6 +47,9 @@ func (s *Store) EnsureLabel(name, color string) (*Label, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("label name is required")
+	}
+	if err := validColor(color); err != nil {
+		return nil, err
 	}
 	var out Label
 	err := s.tx(func(tx *sql.Tx) error {

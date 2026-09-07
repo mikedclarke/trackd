@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -415,5 +418,117 @@ func TestAdminUndefinedFlagIsUsage(t *testing.T) {
 	}
 	if obj := errorObject(err); obj["code"] != "usage" || obj["exit"] != 2 {
 		t.Errorf("error object = %v", obj)
+	}
+}
+
+// captureStdout points os.Stdout at a pipe for the duration of fn and returns
+// what it printed. The reader runs on its own goroutine so a long report
+// cannot fill the pipe and deadlock the writer.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdout
+	os.Stdout = w
+	read := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		read <- string(b)
+	}()
+	fn()
+	os.Stdout = saved
+	w.Close()
+	out := <-read
+	r.Close()
+	return out
+}
+
+// D9: removing a relation is idempotent. Whether there was one there or not,
+// the command exits 0 and says which of the two happened, so a retry after a
+// dropped connection does not read as a failure.
+func TestIssueRelateRemoveIsIdempotent(t *testing.T) {
+	cases := []struct {
+		name    string
+		removed bool
+		want    string
+	}{
+		{"there", true, "removed TSK-1 blocks TSK-2"},
+		{"already gone", false, "no TSK-1 blocks TSK-2 relation to remove"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"relations": []any{},
+					"removed":   tc.removed,
+				}); err != nil {
+					t.Errorf("writing response: %v", err)
+				}
+			}))
+			defer ts.Close()
+			t.Setenv("TRACKD_URL", ts.URL)
+			t.Setenv("TRACKD_TOKEN", "td_test")
+
+			var err error
+			out := captureStdout(t, func() {
+				err = issueRelate([]string{"TSK-1", "TSK-2", "--type", "blocks", "--remove"})
+			})
+			if err != nil {
+				t.Fatalf("relate --remove = %v, want no error", err)
+			}
+			if exitCode(err) != 0 {
+				t.Errorf("exit code = %d, want 0", exitCode(err))
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output = %q, want it to contain %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// D8: a command group asked for help prints its usage and exits 0, whichever
+// of the three spellings was used. Called with no subcommand at all it prints
+// the same line as a usage error (exit 2), because that is a command line
+// missing its verb rather than a request for help.
+func TestGroupUsage(t *testing.T) {
+	const line = "usage: trackd token <add|list|revoke> [flags]"
+	cases := []struct {
+		name     string
+		args     []string
+		handled  bool
+		wantExit int
+	}{
+		{"long help flag", []string{"--help"}, true, 0},
+		{"short help flag", []string{"-h"}, true, 0},
+		{"help word", []string{"help"}, true, 0},
+		{"no subcommand", nil, true, 2},
+		{"a real subcommand", []string{"list"}, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var handled bool
+			var err error
+			out := captureStdout(t, func() { handled, err = groupUsage(tc.args, line) })
+			if handled != tc.handled {
+				t.Fatalf("handled = %v, want %v", handled, tc.handled)
+			}
+			if got := exitCode(err); got != tc.wantExit {
+				t.Errorf("exit code = %d, want %d (%v)", got, tc.wantExit, err)
+			}
+			if !tc.handled {
+				return
+			}
+			// Either way the caller learns the subcommands: printed on stdout
+			// for a help request, carried by the error otherwise.
+			if tc.wantExit == 0 && !strings.Contains(out, line) {
+				t.Errorf("stdout = %q, want the usage line", out)
+			}
+			if tc.wantExit != 0 && !strings.Contains(err.Error(), line) {
+				t.Errorf("error = %q, want the usage line", err)
+			}
+		})
 	}
 }

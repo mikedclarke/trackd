@@ -13,6 +13,22 @@ backup age and integrity, or the raw report with `--json`). Connection via
 stdout and the human line to stderr. Flags may come before or after the
 positional key, so `trackd issue show --json TSK-1` works.
 
+## Labels and titles
+
+`trackd label add <name> [--color <hex>]` creates a label or recolors one that
+already exists. The color must be a hex color, `#rgb` or `#rrggbb` in either
+case, and leaving it out keeps whatever color the label has. An issue title
+and a project or milestone name are trimmed before they are stored and must be
+between 1 and 500 characters. Either rule broken is exit 2.
+
+## Relations
+
+`trackd issue relate <key> <related-key> --type <blocks|relates|duplicate>`
+links two issues, and `--remove` unlinks them. Removal is idempotent: it exits 0
+whether or not there was a relation there, and says which, so a retry after a
+dropped connection is safe. Both issue keys and the type still have to be real
+ones, so a typo is still an error.
+
 ## Empty values
 
 Two rules protect a field from an empty shell variable:
@@ -30,11 +46,21 @@ Two rules protect a field from an empty shell variable:
 
 Exit codes: 0 ok, 1 unexpected, 2 usage or validation (400, 422), 3 not found
 (404), 4 auth (401, 403), 5 conflict (409), 6 server or network (5xx, or the
-server could not be reached). A mistyped flag, like an unknown command, is a
-usage error: exit 2, `code: "usage"`. The client gives a busy server and a
-refused connection three retries with 250ms, 1s and 3s backoff, and times out a
-request after 10 seconds. A create is retried only when it carries an
-idempotency key, so a repeat can never make a duplicate.
+server could not be reached). The server's error codes and the exit code each
+one maps to are tabled in [API.md](API.md). The CLI adds four codes of its own,
+for failures that happen instead of a server's answer rather than in it:
+
+| Code | Exit | When |
+|---|---|---|
+| `usage` | 2 | A mistyped flag, an unknown command or subcommand, a missing or extra positional, an empty string where a value was wanted |
+| `unauthorized` | 4 | No token is set at all, caught locally before any request rather than after a wasted round trip |
+| `unreachable` | 6 | The server could not be reached, after the retries |
+| `degraded` | 6 | `trackd health` against a server reporting degraded health. The report is printed first; the exit code is what a monitor reads |
+
+The client gives a busy server and a refused connection three retries with
+250ms, 1s and 3s backoff, and times out a request after 10 seconds. A create is
+retried only when it carries an idempotency key, so a repeat can never make a
+duplicate.
 
 ## Server commands
 

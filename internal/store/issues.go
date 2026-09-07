@@ -14,8 +14,9 @@ var priorityLabels = []string{"No priority", "Urgent", "High", "Medium", "Low"}
 // carried an idempotency key that has already been used: the original issue
 // comes back untouched and no event is recorded.
 func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, bool, error) {
-	if strings.TrimSpace(in.Title) == "" {
-		return nil, false, errors.New("issue title is required")
+	title, err := validTitle("issue title", in.Title)
+	if err != nil {
+		return nil, false, err
 	}
 	if in.Priority < 0 || in.Priority > 4 {
 		return nil, false, fmt.Errorf("priority %d out of range 0-4", in.Priority)
@@ -29,7 +30,7 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, bool, error) {
 	}
 	var out *Issue
 	created := true
-	err := s.tx(func(tx *sql.Tx) error {
+	err = s.tx(func(tx *sql.Tx) error {
 		if in.IdempotencyKey != "" {
 			var existing string
 			err := tx.QueryRow("SELECT key FROM issues WHERE idempotency_key = ?", in.IdempotencyKey).Scan(&existing)
@@ -81,7 +82,7 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, bool, error) {
 		res, err := tx.Exec(`
 			INSERT INTO issues (key, title, description, status_id, priority, project_id, parent_id, assignee, milestone_id, due_date, created_at, updated_at, started_at, completed_at, canceled_at, idempotency_key)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			key, in.Title, in.Description, st.ID, in.Priority, projectID, parentID, in.Assignee, milestoneID, nullable(in.DueDate), ts, ts, startedAt, completedAt, canceledAt, nullable(in.IdempotencyKey),
+			key, title, in.Description, st.ID, in.Priority, projectID, parentID, in.Assignee, milestoneID, nullable(in.DueDate), ts, ts, startedAt, completedAt, canceledAt, nullable(in.IdempotencyKey),
 		)
 		if err != nil {
 			return err
@@ -139,10 +140,11 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 		sets := []string{"updated_at = ?", "version = version + 1"}
 		args := []any{now()}
 		if p.Title != nil {
-			if strings.TrimSpace(*p.Title) == "" {
-				return errors.New("issue title is required")
+			title, err := validTitle("issue title", *p.Title)
+			if err != nil {
+				return err
 			}
-			sets, args = append(sets, "title = ?"), append(args, *p.Title)
+			sets, args = append(sets, "title = ?"), append(args, title)
 		}
 		if p.Description != nil {
 			// Descriptions are append-only unless the caller says otherwise:
@@ -654,8 +656,17 @@ func (s *Store) AddRelation(issueKey, relatedKey, typ, actor string) error {
 	})
 }
 
-func (s *Store) RemoveRelation(issueKey, relatedKey, typ, actor string) error {
-	return s.tx(func(tx *sql.Tx) error {
+// RemoveRelation unlinks two issues and reports whether there was a link to
+// remove. Removal is idempotent: a relation that is already gone is the state
+// the caller asked for, not a failure, so a retry after a lost connection
+// answers the same as the call that got through. Both issues must still
+// exist, and the type must still be a real one: those are typos, not states.
+func (s *Store) RemoveRelation(issueKey, relatedKey, typ, actor string) (bool, error) {
+	if !relationTypes[typ] {
+		return false, fmt.Errorf("unknown relation type %q", typ)
+	}
+	removed := false
+	err := s.tx(func(tx *sql.Tx) error {
 		issue, err := loadIssue(tx, issueKey)
 		if err != nil {
 			return err
@@ -672,8 +683,9 @@ func (s *Store) RemoveRelation(issueKey, relatedKey, typ, actor string) error {
 			return err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return fmt.Errorf("relation %s %s %s: %w", issueKey, typ, relatedKey, ErrNotFound)
+			return nil
 		}
+		removed = true
 		ts := now()
 		if err := touchIssue(tx, issue.ID, ts); err != nil {
 			return err
@@ -684,6 +696,10 @@ func (s *Store) RemoveRelation(issueKey, relatedKey, typ, actor string) error {
 		rel := Relation{IssueKey: issue.Key, RelatedKey: related.Key, Type: typ}
 		return recordEvent(tx, "issue", issue.ID, actor, "relation.removed", rel, nil)
 	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
 }
 
 func (s *Store) ListRelations(issueKey string) ([]Relation, error) {

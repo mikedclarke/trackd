@@ -707,10 +707,91 @@ func TestRelationEndpoints(t *testing.T) {
 	if len(relations.Relations) != 0 {
 		t.Errorf("after remove = %+v", relations)
 	}
+	if relations.Removed == nil || !*relations.Removed {
+		t.Errorf("removed = %v, want true", relations.Removed)
+	}
+	// D9: removing a relation that is not there is the state the caller asked
+	// for. It answers 200 with removed false, so a retry is safe.
+	e.expect("POST", "/api/v1/issues/TSK-1/relations", map[string]any{
+		"related": "TSK-2",
+		"type":    "blocks",
+		"remove":  true,
+	}, http.StatusOK, &relations)
+	if relations.Removed == nil || *relations.Removed {
+		t.Errorf("second removed = %v, want false", relations.Removed)
+	}
+	// Idempotent is not lax: a mistyped type or key still fails.
+	e.expectError("POST", "/api/v1/issues/TSK-1/relations", map[string]any{
+		"related": "TSK-2",
+		"type":    "nonsense",
+		"remove":  true,
+	}, http.StatusBadRequest, codeValidation)
+	e.expectError("POST", "/api/v1/issues/TSK-1/relations", map[string]any{
+		"related": "TSK-99",
+		"type":    "blocks",
+		"remove":  true,
+	}, http.StatusNotFound, codeNotFound)
+	// A listing carries no removed field at all, so it decodes into a fresh
+	// value with the pointer still nil.
+	var listed relationListResponse
+	e.expect("GET", "/api/v1/issues/TSK-1/relations", nil, http.StatusOK, &listed)
+	if listed.Removed != nil {
+		t.Errorf("listing removed = %v, want absent", listed.Removed)
+	}
 	e.expectError("POST", "/api/v1/issues/TSK-1/relations", map[string]any{
 		"related": "TSK-2",
 		"type":    "nonsense",
 	}, http.StatusBadRequest, codeValidation)
+}
+
+// D5 and D7: the two field-shape rules the store enforces reach the API as 422
+// invalid_ref, on every entity that shares the pattern and on update as well
+// as create.
+func TestFieldValidationEndpoints(t *testing.T) {
+	e := newTestEnv(t)
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "seed"}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/projects", map[string]any{"name": "Holder"}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/milestones", map[string]any{"project": "holder", "name": "seed"}, http.StatusCreated, nil)
+
+	long := strings.Repeat("a", 501)
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{"issue create empty title", "POST", "/api/v1/issues", map[string]any{"title": "   "}},
+		{"issue create long title", "POST", "/api/v1/issues", map[string]any{"title": long}},
+		{"issue update empty title", "PATCH", "/api/v1/issues/TSK-1", map[string]any{"title": ""}},
+		{"issue update long title", "PATCH", "/api/v1/issues/TSK-1", map[string]any{"title": long}},
+		{"project create empty name", "POST", "/api/v1/projects", map[string]any{"name": " "}},
+		{"project create long name", "POST", "/api/v1/projects", map[string]any{"name": long}},
+		{"project update empty name", "PATCH", "/api/v1/projects/holder", map[string]any{"name": ""}},
+		{"project update long name", "PATCH", "/api/v1/projects/holder", map[string]any{"name": long}},
+		{"milestone create empty name", "POST", "/api/v1/milestones", map[string]any{"project": "holder", "name": " "}},
+		{"milestone create long name", "POST", "/api/v1/milestones", map[string]any{"project": "holder", "name": long}},
+		{"milestone update empty name", "PATCH", "/api/v1/milestones/1", map[string]any{"name": ""}},
+		{"milestone update long name", "PATCH", "/api/v1/milestones/1", map[string]any{"name": long}},
+		{"label color without a hash", "POST", "/api/v1/labels", map[string]any{"name": "ready", "color": "ff0000"}},
+		{"label color as a word", "POST", "/api/v1/labels", map[string]any{"name": "ready", "color": "red"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e.expectError(tc.method, tc.path, tc.body, http.StatusUnprocessableEntity, codeInvalidRef)
+		})
+	}
+
+	// The accepted shapes still work, and a title is stored trimmed.
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "  padded  "}, http.StatusCreated, &issue)
+	if issue.Title != "padded" {
+		t.Errorf("title = %q, want it trimmed", issue.Title)
+	}
+	var label store.Label
+	e.expect("POST", "/api/v1/labels", map[string]any{"name": "ready", "color": "#F0A"}, http.StatusCreated, &label)
+	if label.Color != "#F0A" {
+		t.Errorf("color = %q", label.Color)
+	}
 }
 
 func TestProjectAndLabelEndpoints(t *testing.T) {

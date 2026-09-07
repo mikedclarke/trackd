@@ -407,6 +407,43 @@ func TestLabelAddRemoveAndAppendBodies(t *testing.T) {
 	}
 }
 
+// D9: a removal answers with the relations that remain and a removed flag. The
+// flag is the only way to tell "there was one and it is gone" from "there was
+// never one", and both are a success.
+func TestSaveRelationReportsWhetherAnythingWasRemoved(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+		want bool
+	}{
+		{"removed", map[string]any{"relations": []any{}, "removed": true}, true},
+		{"nothing there", map[string]any{"relations": []any{}, "removed": false}, false},
+		// An add carries no removed field, and the zero value is the answer.
+		{"added", map[string]any{"relations": []map[string]any{{"issue_key": "TSK-1", "related_key": "TSK-2", "type": "blocks"}}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Errorf("body: %v", err)
+				}
+				writeJSON(t, w, 200, tc.body)
+			})
+			_, removed, err := c.SaveRelation("TSK-1", "TSK-2", "blocks", tc.want, "pm")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if removed != tc.want {
+				t.Errorf("removed = %v, want %v", removed, tc.want)
+			}
+			if got["related"] != "TSK-2" || got["type"] != "blocks" || got["actor"] != "pm" {
+				t.Errorf("request body = %v", got)
+			}
+		})
+	}
+}
+
 func TestCommentThreadAndEdit(t *testing.T) {
 	var path, method string
 	var got map[string]any

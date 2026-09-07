@@ -67,3 +67,58 @@ func TestLabelGroupsSetting(t *testing.T) {
 		t.Error("a malformed label_groups setting was ignored")
 	}
 }
+
+// D5: a label color is a hex color or nothing. A value the board cannot
+// render is a typo, and it is refused rather than stored.
+func TestLabelColorValidation(t *testing.T) {
+	cases := []struct {
+		name  string
+		color string
+		want  bool
+	}{
+		{"none", "", true},
+		{"short form", "#f00", true},
+		{"long form", "#ff0000", true},
+		{"upper case", "#FF00AA", true},
+		{"mixed case", "#Ff00aA", true},
+		{"no hash", "ff0000", false},
+		{"a word", "red", false},
+		{"too few digits", "#ff", false},
+		{"too many digits", "#ff00aabb", false},
+		{"not hex", "#gggggg", false},
+		{"padded", " #ff0000 ", false},
+		{"blank", "   ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			label, err := s.EnsureLabel("ready", tc.color)
+			if !tc.want {
+				if !errors.Is(err, ErrInvalidRef) {
+					t.Fatalf("color %q = %v, want ErrInvalidRef", tc.color, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("color %q = %v, want no error", tc.color, err)
+			}
+			if label.Color != tc.color {
+				t.Errorf("stored color = %q, want %q", label.Color, tc.color)
+			}
+		})
+	}
+
+	// The same check guards a recolor of a label that already exists, which
+	// is the other half of what EnsureLabel does.
+	s := openTestStore(t)
+	if _, err := s.EnsureLabel("ready", "#f00"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureLabel("ready", "puce"); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("recolor with a bad value = %v, want ErrInvalidRef", err)
+	}
+	label, err := s.EnsureLabel("ready", "")
+	if err != nil || label.Color != "#f00" {
+		t.Errorf("label after a refused recolor = %+v, %v, want the old color kept", label, err)
+	}
+}

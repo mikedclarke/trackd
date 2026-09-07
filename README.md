@@ -91,7 +91,9 @@ Open the same URL in a browser for the read-only board (sign in with a token).
 - **Issues** have a stable key (`TSK-1`), a status, a 0-4 priority (1 = urgent,
   4 = low), labels, an optional project, parent, assignee, and milestone,
   relations (`blocks`, `relates`, `duplicate`), comments, an integer `version`,
-  and a full activity log.
+  and a full activity log. Titles are trimmed and capped at 500 characters.
+  Removing a relation is idempotent: `trackd issue relate A B --remove` exits 0
+  whether or not the relation was there, and says which, so a retry is safe.
 - **Descriptions are append-only.** Once an issue has a description, an update
   that would overwrite it is refused with a 409. Add to it with
   `trackd issue append KEY --text ...`, or pass `--replace-description` to say
@@ -103,7 +105,8 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   `--remove-label` leave the rest of the set alone; `--labels` still replaces the
   whole set when that is what you want, and `--clear-labels` empties it. Labels
   must exist before they can be applied: `trackd label add <name>` (or the label
-  endpoint) is the only place a label is created, so a typo cannot invent one.
+  endpoint) is the only place a label is created, so a typo cannot invent one. A
+  label's optional `--color` is a hex color, `#rgb` or `#rrggbb`.
   Label groups can be exclusive: configure
   `trackd setting set label_groups '[["ready","blocked"]]'` and an issue holds at
   most one label from each group, so adding one removes the other and a
@@ -156,11 +159,11 @@ Open the same URL in a browser for the read-only board (sign in with a token).
 
 ### REST
 
-Everything is under `/api/v1` with bearer auth. Issues, comments, relations, projects, milestones, labels, statuses and a global activity feed; list responses are envelopes with paging cursors; PATCH changes only the fields it includes; every error is `{"error", "code"}`; `GET /healthz` is unauthenticated. There are no DELETE endpoints by design. The full reference, filters and error codes included, is in [docs/API.md](docs/API.md).
+Everything is under `/api/v1` with bearer auth. Issues, comments, relations, projects, milestones, labels, statuses and a global activity feed; list responses are envelopes with paging cursors; PATCH changes only the fields it includes; every error is `{"error", "code"}`; `GET /healthz` is unauthenticated. There are no DELETE endpoints by design. The ten error codes are tabled with their HTTP status and CLI exit code in [docs/API.md](docs/API.md), along with the full reference and the list filters.
 
 ### CLI
 
-`trackd issue|comment|events|project|milestone|label|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 2 usage, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. On the body-bearing commands (`issue append`, `issue comment`, `comment edit`) `--text` and `--body` are interchangeable. Details in [docs/CLI.md](docs/CLI.md).
+`trackd issue|comment|events|project|milestone|label|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 1 unexpected, 2 usage or validation, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. On the body-bearing commands (`issue append`, `issue comment`, `comment edit`) `--text` and `--body` are interchangeable. Details in [docs/CLI.md](docs/CLI.md).
 
 ### MCP
 

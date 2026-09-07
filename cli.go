@@ -737,12 +737,21 @@ func issueRelate(args []string) error {
 	if err != nil {
 		return err
 	}
-	relations, err := cl.SaveRelation(lead[0], lead[1], *typ, *remove, *actor)
+	relations, removed, err := cl.SaveRelation(lead[0], lead[1], *typ, *remove, *actor)
 	if err != nil {
 		return err
 	}
 	if *common.jsonOut {
 		return printJSON(relations)
+	}
+	// Removing a relation that was not there is not a failure, so say which of
+	// the two happened rather than leaving the caller to diff the list.
+	if *remove {
+		if removed {
+			fmt.Printf("removed %s %s %s\n", lead[0], *typ, lead[1])
+		} else {
+			fmt.Printf("no %s %s %s relation to remove\n", lead[0], *typ, lead[1])
+		}
 	}
 	for _, r := range relations {
 		fmt.Printf("%s %s %s\n", r.IssueKey, r.Type, r.RelatedKey)

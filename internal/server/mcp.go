@@ -203,6 +203,9 @@ type mcpSaveRelationIn struct {
 
 type mcpRelationsOut struct {
 	Relations []store.Relation `json:"relations"`
+	// Removed answers a removal only: false says there was no such relation,
+	// which is still a success because removal is idempotent.
+	Removed *bool `json:"removed,omitempty"`
 }
 
 type mcpListActivityIn struct {
@@ -527,13 +530,16 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "save_relation",
 		Annotations: writeTool(true),
-		Description: "Link two issues with a relation of type blocks, relates or duplicate, or unlink them by passing remove.",
+		Description: "Link two issues with a relation of type blocks, relates or duplicate, or unlink them by passing remove. Unlinking is idempotent: removed reports whether there was a relation there.",
 		InputSchema: enumSchema[mcpSaveRelationIn](map[string][]any{"type": {"blocks", "relates", "duplicate"}}),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveRelationIn) (*mcp.CallToolResult, mcpRelationsOut, error) {
 		act := resolve(in.Actor)
+		var removed *bool
 		var err error
 		if in.Remove {
-			err = s.store.RemoveRelation(in.Key, in.Related, in.Type, act)
+			var gone bool
+			gone, err = s.store.RemoveRelation(in.Key, in.Related, in.Type, act)
+			removed = &gone
 		} else {
 			err = s.store.AddRelation(in.Key, in.Related, in.Type, act)
 		}
@@ -547,7 +553,7 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		if relations == nil {
 			relations = []store.Relation{}
 		}
-		return nil, mcpRelationsOut{Relations: relations}, nil
+		return nil, mcpRelationsOut{Relations: relations, Removed: removed}, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{

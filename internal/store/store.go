@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"modernc.org/sqlite"
 )
@@ -381,6 +382,25 @@ func validDate(s string) error {
 		return fmt.Errorf("date %q must be YYYY-MM-DD", s)
 	}
 	return nil
+}
+
+// maxTitleLength caps an issue title, a project name and a milestone name.
+// Long enough for any real headline, short enough that a whole document pasted
+// into the field is refused instead of stored where nothing will read it.
+const maxTitleLength = 500
+
+// validTitle checks the one-line naming fields and returns the trimmed value
+// the caller should store. field is the caller's own word for it, so the
+// message reads in the terms the request used.
+func validTitle(field, s string) (string, error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s is required: %w", field, ErrInvalidRef)
+	}
+	if n := utf8.RuneCountInString(trimmed); n > maxTitleLength {
+		return "", fmt.Errorf("%s is %d characters, over the %d character limit: %w", field, n, maxTitleLength, ErrInvalidRef)
+	}
+	return trimmed, nil
 }
 
 // nullable maps "" to NULL for optional text columns.
