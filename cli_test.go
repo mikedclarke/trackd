@@ -532,3 +532,214 @@ func TestGroupUsage(t *testing.T) {
 		})
 	}
 }
+
+// `get` and `view` are the common wrong guesses for `show`; both route to it
+// rather than the unknown-subcommand error.
+func TestIssueGetViewAliasShow(t *testing.T) {
+	for _, sub := range []string{"get", "view"} {
+		err := cmdIssue([]string{sub})
+		var usage *usageError
+		if !errors.As(err, &usage) {
+			t.Fatalf("issue %s = %v, want a usage error", sub, err)
+		}
+		if strings.Contains(err.Error(), "unknown issue subcommand") {
+			t.Errorf("issue %s hit the unknown-subcommand path: %q", sub, err.Error())
+		}
+		if !strings.Contains(err.Error(), "issue show") {
+			t.Errorf("issue %s routed to %q, want issue show", sub, err.Error())
+		}
+	}
+}
+
+// The `comment <x>` hint covers the create verbs and `-`, not just a key.
+func TestCommentHintBroadened(t *testing.T) {
+	for _, sub := range []string{"create", "add", "new", "-"} {
+		err := cmdComment([]string{sub})
+		var usage *usageError
+		if !errors.As(err, &usage) {
+			t.Fatalf("comment %s = %v, want a usage error", sub, err)
+		}
+		if !strings.Contains(err.Error(), "trackd issue comment") {
+			t.Errorf("comment %s = %q, want the nested-command hint", sub, err.Error())
+		}
+	}
+	if err := cmdComment([]string{"nope"}); err == nil || !strings.Contains(err.Error(), "unknown comment subcommand") {
+		t.Errorf("comment nope = %v, want the plain unknown-subcommand error", err)
+	}
+}
+
+// --search is an alias for -q; either sends the same query, and naming both is a
+// usage error before any request.
+func TestIssueListSearchAlias(t *testing.T) {
+	var gotQ string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQ = r.URL.Query().Get("q")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"issues": []any{}, "next_offset": nil}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	for _, args := range [][]string{{"-q", "foo"}, {"--search", "foo"}} {
+		gotQ = ""
+		captureStdout(t, func() {
+			if err := issueList(args); err != nil {
+				t.Fatalf("issue list %v = %v", args, err)
+			}
+		})
+		if gotQ != "foo" {
+			t.Errorf("issue list %v sent q=%q, want foo", args, gotQ)
+		}
+	}
+
+	err := issueList([]string{"-q", "a", "--search", "b"})
+	var usage *usageError
+	if !errors.As(err, &usage) {
+		t.Errorf("both -q and --search = %v, want a usage error", err)
+	}
+}
+
+// `statuses list` is tolerated (project/label train the habit), but any other
+// argument is still a usage error.
+func TestStatusesListTolerated(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"statuses": []any{}}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	for _, args := range [][]string{nil, {"list"}} {
+		captureStdout(t, func() {
+			if err := cmdStatuses(args); err != nil {
+				t.Errorf("statuses %v = %v, want no error", args, err)
+			}
+		})
+	}
+	if err := cmdStatuses([]string{"nope"}); exitCode(err) != 2 {
+		t.Errorf("statuses nope = %v, want a usage error", err)
+	}
+}
+
+func TestParsePriority(t *testing.T) {
+	good := map[string]int{
+		"0": 0, "1": 1, "4": 4,
+		"none": 0, "urgent": 1, "high": 2, "medium": 3, "low": 4,
+		"HIGH": 2, "Urgent": 1,
+	}
+	for in, want := range good {
+		if got, err := parsePriority(in); err != nil || got != want {
+			t.Errorf("parsePriority(%q) = %d, %v, want %d", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"5", "-1", "highest", "", "2x"} {
+		_, err := parsePriority(bad)
+		var usage *usageError
+		if !errors.As(err, &usage) || exitCode(err) != 2 {
+			t.Errorf("parsePriority(%q) = %v, want a usage error (exit 2)", bad, err)
+		}
+	}
+}
+
+// A priority word reaches the create request as the matching int; a bad word is
+// a usage error before any request.
+func TestIssueCreatePriorityWord(t *testing.T) {
+	var gotPriority any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding body: %v", err)
+		}
+		gotPriority = body["priority"]
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"key": "TSK-1", "status": "Triage"}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	captureStdout(t, func() {
+		if err := issueCreate([]string{"--title", "x", "--priority", "high"}); err != nil {
+			t.Fatalf("issue create --priority high = %v", err)
+		}
+	})
+	if gotPriority != float64(2) { // JSON numbers decode to float64
+		t.Errorf("priority in body = %v, want 2", gotPriority)
+	}
+
+	if err := issueCreate([]string{"--title", "x", "--priority", "highest"}); exitCode(err) != 2 {
+		t.Errorf("bad priority word = %v, want a usage error", err)
+	}
+}
+
+// --columns narrows and reorders the flat output; --tsv is raw tab-separated
+// records; neither may combine with --json.
+func TestIssueListFlatOutput(t *testing.T) {
+	issues := []map[string]any{
+		{"key": "TSK-1", "status": "Todo", "priority": 2, "project": "app", "assignee": "pm", "labels": []string{"bug"}, "title": "First"},
+		{"key": "TSK-2", "status": "Done", "priority": 0, "project": "", "assignee": "", "labels": []string{}, "title": "Second"},
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"issues": issues, "next_offset": nil}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	out := captureStdout(t, func() {
+		if err := issueList([]string{"--columns", "key,status,title"}); err != nil {
+			t.Fatalf("issue list --columns = %v", err)
+		}
+	})
+	if !strings.Contains(out, "KEY") || !strings.Contains(out, "STATUS") || !strings.Contains(out, "TITLE") {
+		t.Errorf("columns header missing from %q", out)
+	}
+	if strings.Contains(out, "PROJECT") || strings.Contains(out, "ASSIGNEE") {
+		t.Errorf("columns output leaked unselected columns: %q", out)
+	}
+	if !strings.Contains(out, "TSK-1") || !strings.Contains(out, "First") {
+		t.Errorf("columns output missing a row: %q", out)
+	}
+
+	out = captureStdout(t, func() {
+		if err := issueList([]string{"--tsv"}); err != nil {
+			t.Fatalf("issue list --tsv = %v", err)
+		}
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("tsv lines = %d, want 2 (no header): %q", len(lines), out)
+	}
+	first := strings.Split(lines[0], "\t")
+	if len(first) != len(issueColumns) {
+		t.Fatalf("tsv row has %d columns, want %d: %q", len(first), len(issueColumns), lines[0])
+	}
+	if first[0] != "TSK-1" || first[2] != "2" {
+		t.Errorf("tsv row = %q, want key TSK-1 and priority 2", lines[0])
+	}
+	if second := strings.Split(lines[1], "\t"); second[3] != "-" {
+		t.Errorf("empty project cell = %q, want a dash", second[3])
+	}
+
+	var usage *usageError
+	if err := issueList([]string{"--tsv", "--json"}); !errors.As(err, &usage) {
+		t.Errorf("--tsv --json = %v, want a usage error", err)
+	}
+	if err := issueList([]string{"--columns", "key", "--json"}); !errors.As(err, &usage) {
+		t.Errorf("--columns --json = %v, want a usage error", err)
+	}
+	if err := issueList([]string{"--columns", "bogus"}); !errors.As(err, &usage) {
+		t.Errorf("--columns bogus = %v, want a usage error", err)
+	}
+}

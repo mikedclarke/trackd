@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -65,6 +66,40 @@ func TestMilestoneCRUD(t *testing.T) {
 	}
 	if len(events) != 3 {
 		t.Fatalf("expected 3 milestone events (create, update, archive), got %d", len(events))
+	}
+}
+
+func TestIssueMilestoneByID(t *testing.T) {
+	s := milestoneFixture(t)
+	list, err := s.ListMilestones("rebuild", false)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("milestones = %v, %v", list, err)
+	}
+	id := list[0].ID
+
+	// A numeric argument resolves to the milestone with that id.
+	issue := mustCreateIssue(t, s, IssueInput{Title: "By id", Project: "rebuild", Milestone: strconv.FormatInt(id, 10)}, "pm")
+	if issue.Milestone != "Launch" {
+		t.Fatalf("milestone by id = %q, want Launch", issue.Milestone)
+	}
+
+	// A numeric id that does not exist is an invalid reference, not a name lookup.
+	if _, _, err := s.CreateIssue(IssueInput{Title: "Bad id", Project: "rebuild", Milestone: strconv.FormatInt(id+999, 10)}, "pm"); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("unknown milestone id = %v, want ErrInvalidRef", err)
+	}
+
+	// An id belonging to another project does not resolve within this one.
+	if _, err := s.CreateProject(ProjectInput{Name: "Other"}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.CreateIssue(IssueInput{Title: "Wrong project", Project: "other", Milestone: strconv.FormatInt(id, 10)}, "pm"); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("cross-project milestone id = %v, want ErrInvalidRef", err)
+	}
+
+	// The name path still works.
+	byName := mustCreateIssue(t, s, IssueInput{Title: "By name", Project: "rebuild", Milestone: "Launch"}, "pm")
+	if byName.Milestone != "Launch" {
+		t.Fatalf("milestone by name = %q", byName.Milestone)
 	}
 }
 

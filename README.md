@@ -148,10 +148,12 @@ Open the same URL in a browser for the read-only board (sign in with a token).
   except one: replacing or clearing a description, which needs `admin`. Give the
   agents `agent` tokens and keep an `admin` token for yourself.
 - **Settings** live in the database and are read and written with
-  `trackd setting list|get|set`. There are three: `issue_prefix` (the key
+  `trackd setting list|get|set`. There are four: `issue_prefix` (the key
   prefix for new issues, `TSK` by default; existing keys keep theirs),
-  `label_groups` (the exclusive groups above) and `base_url` (the server's
-  public URL, used to fill each issue's `url` field for links in agent output).
+  `label_groups` (the exclusive groups above), `base_url` (the server's
+  public URL, used to fill each issue's `url` field for links in agent output)
+  and `agent_label` (a label auto-applied to issues created by non-admin tokens;
+  empty by default, which disables it).
   Every change is audited. `set` writes to the database file directly, so it
   refuses while a server is running: stop the server, set, start it again.
 

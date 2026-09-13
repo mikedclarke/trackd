@@ -340,6 +340,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 			if in.AppendDescription != "" {
 				return nil, store.Issue{}, mcpError(errors.New("mode create takes description, not append_description"))
 			}
+			createLabels, err := s.agentLabel(role, sliceOr(labels))
+			if err != nil {
+				return nil, store.Issue{}, mcpError(err)
+			}
 			issue, _, err := s.store.CreateIssue(store.IssueInput{
 				Title:          strOr(in.Title),
 				Description:    strOr(in.Description),
@@ -350,7 +354,7 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 				Assignee:       strOr(in.Assignee),
 				Milestone:      strOr(in.Milestone),
 				DueDate:        strOr(in.DueDate),
-				Labels:         sliceOr(labels),
+				Labels:         createLabels,
 				IdempotencyKey: in.IdempotencyKey,
 			}, act)
 			if err != nil {

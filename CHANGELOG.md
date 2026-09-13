@@ -7,6 +7,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-13
+
+### Added
+
+- `issue get` and `issue view` as aliases for `issue show`.
+- `issue list --search` as an alias for `-q`.
+- `issue list --columns <cols>` and `--tsv` for a lightweight, flat list output
+  (a subset of `key,status,priority,project,assignee,labels,title`), so a queue
+  read does not need to parse the full JSON. The default table and default
+  `--json` output are unchanged.
+- `--priority` on `issue create` and `issue update` accepts a word
+  (`none|urgent|high|medium|low`) as well as the `0-4` integer.
+- `issue create --milestone` (and `update`) accepts a milestone id as well as a
+  name, matching how `milestone update` addresses one.
+- `agent_label` setting: a label the server auto-applies to issues created by
+  non-admin tokens (empty by default, which disables it).
+
+### Changed
+
+- `statuses list` is accepted as a synonym for `statuses` (the `list` verb from
+  `project list` / `label list` is tolerated rather than rejected).
+- `trackd comment create` / `add` / `new` now point at `trackd issue comment`
+  rather than returning a bare "unknown subcommand".
+
 ## [0.1.1] - 2026-09-07
 
 ### Added

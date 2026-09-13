@@ -52,6 +52,30 @@ func newMCPSession(t *testing.T) (*mcp.ClientSession, *store.Store) {
 	return session, st
 }
 
+// mcpSessionAs opens a second MCP session against an existing store under a
+// token of the given name and role, for tests that need to act as more than
+// one identity.
+func mcpSessionAs(t *testing.T, st *store.Store, name, role string) *mcp.ClientSession {
+	t.Helper()
+	token, err := st.CreateToken(name, role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(st, "test").Handler())
+	t.Cleanup(ts.Close)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   ts.URL + "/mcp",
+		HTTPClient: &http.Client{Transport: &authTransport{token: token, base: http.DefaultTransport}},
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(context.Background(), transport, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
 func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[string]any, out any) *mcp.CallToolResult {
 	t.Helper()
 	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
@@ -243,6 +267,36 @@ func TestMCPWorkflow(t *testing.T) {
 	callTool(t, session, "list_statuses", nil, &statuses)
 	if len(statuses.Statuses) != 8 || statuses.Statuses[0].Name != "Triage" {
 		t.Errorf("statuses = %+v", statuses)
+	}
+}
+
+func TestMCPAgentLabelAutoApply(t *testing.T) {
+	session, st := newMCPSession(t) // agent token
+	if err := st.SetSetting("agent_label", "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureLabel("other", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	var issue store.Issue
+	callTool(t, session, "save_issue", map[string]any{"mode": "create", "title": "agent made"}, &issue)
+	if len(issue.Labels) != 1 || issue.Labels[0] != "agent" {
+		t.Fatalf("agent create = %v, want [agent]", issue.Labels)
+	}
+
+	// An explicit pass of the same label is not doubled.
+	callTool(t, session, "save_issue", map[string]any{"mode": "create", "title": "explicit", "labels": []string{"agent", "other"}}, &issue)
+	if len(issue.Labels) != 2 || issue.Labels[0] != "agent" || issue.Labels[1] != "other" {
+		t.Fatalf("explicit pass = %v, want [agent other]", issue.Labels)
+	}
+
+	// An admin session on the same store does not get the label.
+	admin := mcpSessionAs(t, st, "owner", "admin")
+	var adminIssue store.Issue
+	callTool(t, admin, "save_issue", map[string]any{"mode": "create", "title": "admin made"}, &adminIssue)
+	if len(adminIssue.Labels) != 0 {
+		t.Fatalf("admin create = %v, want no label", adminIssue.Labels)
 	}
 }
 

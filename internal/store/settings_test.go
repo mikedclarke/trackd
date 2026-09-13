@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateSetting(t *testing.T) {
 	cases := []struct {
@@ -24,6 +27,10 @@ func TestValidateSetting(t *testing.T) {
 		{"base_url", "https://trackd.example", true},
 		{"base_url", "trackd.example", false},
 		{"base_url", "ftp://x", false},
+		{"agent_label", "", true},
+		{"agent_label", "   ", true},
+		{"agent_label", "triage-bot", true},
+		{"agent_label", strings.Repeat("x", 501), false},
 		{"issue_seq", "5", false},
 		{"nope", "x", false},
 	}

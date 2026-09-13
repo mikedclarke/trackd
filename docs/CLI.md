@@ -4,14 +4,22 @@ The client commands talk HTTP to a running server; the server commands operate o
 
 ## Client commands
 
-`issue list|show|create|update|append|comment|relate|events`, `comment edit`,
-`events`, `project list|show|create|update`, `milestone list|create|update`,
-`label list|add`, `statuses`, `health` (a table of status, version, schema,
-backup age and integrity, or the raw report with `--json`). Connection via
-`--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`. Every command takes
-`--json` for machine-readable output, on failure too: the error object goes to
-stdout and the human line to stderr. Flags may come before or after the
-positional key, so `trackd issue show --json TSK-1` works.
+`issue list|show|get|view|create|update|append|comment|relate|events`,
+`comment edit`, `events`, `project list|show|create|update`,
+`milestone list|create|update`, `label list|add`, `statuses`, `health` (a table
+of status, version, schema, backup age and integrity, or the raw report with
+`--json`). Connection via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`.
+Every command takes `--json` for machine-readable output, on failure too: the
+error object goes to stdout and the human line to stderr. Flags may come before
+or after the positional key, so `trackd issue show --json TSK-1` works.
+
+`get` and `view` are aliases for `issue show`, and `statuses list` is accepted
+as a synonym for `statuses`. `issue list` takes `--search` as an alias for `-q`,
+and `--columns <cols>` or `--tsv` for a flat listing of only the named columns
+(any of `key,status,priority,project,assignee,labels,title`) instead of the full
+table or JSON. `--priority` on `issue create` and `issue update` accepts a word
+(`none|urgent|high|medium|low`) as well as `0-4`, and `--milestone` accepts a
+milestone id as well as a name.
 
 ## Labels and titles
 
@@ -76,6 +84,7 @@ trackd setting get issue_prefix
 trackd setting set issue_prefix ACME        # new keys become ACME-1, ACME-2, ...
 trackd setting set label_groups '[["ready","blocked"]]'
 trackd setting set base_url https://trackd.example.com
+trackd setting set agent_label source:agent  # auto-tag issues created by non-admin tokens; empty disables
 ```
 
 Every `set` records a `setting.updated` event with the old and new value (`trackd events --entity setting`). `set` writes to the database file, so it refuses while a server is running on it. `list` and `get` open the file read-only and are safe at any time.

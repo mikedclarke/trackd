@@ -171,6 +171,33 @@ func tokenRole(r *http.Request) string {
 	return ""
 }
 
+// agentLabel appends the operator-configured agent_label to a create's labels
+// when the caller is a non-admin token, so an operator can mark every
+// agent-created issue without the agent naming the label itself. It is a no-op
+// when the setting is empty or the caller is an admin, and never adds a label a
+// caller already passed. The label is created if missing because a create
+// rejects labels that do not already exist.
+func (s *Server) agentLabel(role string, labels []string) ([]string, error) {
+	name, err := s.store.Setting("agent_label")
+	if err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || role == roleAdmin {
+		return labels, nil
+	}
+	label, err := s.store.EnsureLabel(name, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range labels {
+		if strings.EqualFold(l, label.Name) {
+			return labels, nil
+		}
+	}
+	return append(labels, label.Name), nil
+}
+
 // actor resolves attribution for a write: an explicit actor in the request
 // body wins, otherwise the authenticating token's name is used.
 func actor(r *http.Request, explicit string) string {

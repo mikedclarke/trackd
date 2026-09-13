@@ -167,6 +167,11 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	labels, err := s.agentLabel(tokenRole(r), req.Labels)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	issue, created, err := s.store.CreateIssue(store.IssueInput{
 		Title:          req.Title,
 		Description:    req.Description,
@@ -177,7 +182,7 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		Assignee:       req.Assignee,
 		Milestone:      req.Milestone,
 		DueDate:        req.DueDate,
-		Labels:         req.Labels,
+		Labels:         labels,
 		IdempotencyKey: req.IdempotencyKey,
 	}, actor(r, req.Actor))
 	if err != nil {

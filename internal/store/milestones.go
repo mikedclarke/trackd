@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -175,14 +176,31 @@ func loadMilestone(tx *sql.Tx, id int64) (*Milestone, error) {
 	return m, nil
 }
 
-// optionalMilestoneID resolves a milestone by name within a project. Archived
-// milestones cannot be assigned to issues.
+// optionalMilestoneID resolves a milestone within a project. A purely numeric
+// argument is a milestone id, matching how milestone update addresses one;
+// anything else is a name. Archived milestones cannot be assigned to issues.
 func optionalMilestoneID(tx *sql.Tx, projectSlug, name string) (any, error) {
 	if name == "" {
 		return nil, nil
 	}
 	if projectSlug == "" {
 		return nil, errors.New("milestones belong to a project; set the issue's project first")
+	}
+	if n, err := strconv.ParseInt(name, 10, 64); err == nil {
+		var id int64
+		err := tx.QueryRow(`
+			SELECT m.id FROM milestones m
+			JOIN projects p ON p.id = m.project_id
+			WHERE m.id = ? AND p.slug = ? COLLATE NOCASE AND m.archived_at IS NULL`,
+			n, projectSlug,
+		).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("milestone %d in project %s: %w", n, projectSlug, ErrInvalidRef)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return id, nil
 	}
 	var id int64
 	err := tx.QueryRow(`

@@ -171,6 +171,22 @@ func parseSet(fs *flag.FlagSet, args []string) error {
 // anywhere among the flags: "issue show --json TSK-1" and "issue show TSK-1
 // --json" are the same command.
 func parseArgs(fs *flag.FlagSet, args []string, n int, usage string) ([]string, error) {
+	positional, err := collectArgs(fs, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(positional) != n {
+		return nil, usagef("usage: %s", usage)
+	}
+	if err := checkEmptyFlags(fs); err != nil {
+		return nil, err
+	}
+	return positional, nil
+}
+
+// collectArgs parses flags and returns the positional arguments without a
+// fixed-count check, for a command that accepts a variable number of them.
+func collectArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string
 	for {
 		if err := parseSet(fs, args); err != nil {
@@ -182,12 +198,6 @@ func parseArgs(fs *flag.FlagSet, args []string, n int, usage string) ([]string, 
 		}
 		positional = append(positional, rest[0])
 		args = rest[1:]
-	}
-	if len(positional) != n {
-		return nil, usagef("usage: %s", usage)
-	}
-	if err := checkEmptyFlags(fs); err != nil {
-		return nil, err
 	}
 	return positional, nil
 }
@@ -245,14 +255,15 @@ func clearFlag(fs *flag.FlagSet, name, what string) *bool {
 func strp(s string) *string { return &s }
 
 func cmdIssue(args []string) error {
-	if done, err := groupUsage(args, "usage: trackd issue <list|show|create|update|append|comment|relate|events> [flags]"); done {
+	if done, err := groupUsage(args, "usage: trackd issue <list|show|get|view|create|update|append|comment|relate|events> [flags]"); done {
 		return err
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "list":
 		return issueList(rest)
-	case "show":
+	case "show", "get", "view":
+		// "get" and "view" are the common wrong guesses for "show".
 		return issueShow(rest)
 	case "create":
 		return issueCreate(rest)
@@ -283,7 +294,8 @@ func issueList(args []string) error {
 	parent := fs.String("parent", "", "filter by parent issue key")
 	assignee := fs.String("assignee", "", "filter by assignee name")
 	milestone := fs.String("milestone", "", "filter by milestone name")
-	query := fs.String("q", "", "substring search over key, title, description and comments")
+	queryFlag := fs.String("q", "", "substring search over key, title, description and comments")
+	search := fs.String("search", "", "alias for -q")
 	updatedSince := fs.String("updated-since", "", "only issues updated at or after this RFC3339 time")
 	completedSince := fs.String("completed-since", "", "only issues completed at or after this RFC3339 time")
 	archived := fs.Bool("archived", false, "include archived issues")
@@ -291,13 +303,27 @@ func issueList(args []string) error {
 	orderBy := fs.String("order-by", "", "sort order: updated (default), created, priority")
 	limit := fs.Int("limit", 0, "maximum results (default 100, max 500)")
 	offset := fs.Int("offset", 0, "skip this many results")
+	columns := fs.String("columns", "", "flat output of only these columns, comma-separated from "+strings.Join(issueColumns, ",")+" (default all); not valid with --json")
+	tsv := fs.Bool("tsv", false, "flat tab-separated output for machine reading, no padding; not valid with --json")
 	if err := parseFlags(fs, args, "trackd issue list [flags]"); err != nil {
+		return err
+	}
+	query, err := oneOf("q", *queryFlag, "search", *search)
+	if err != nil {
+		return err
+	}
+	flat := *tsv || *columns != ""
+	if *common.jsonOut && flat {
+		return usagef("--columns and --tsv format the table output; they cannot be combined with --json")
+	}
+	cols, err := issueColumnList(*columns)
+	if err != nil {
 		return err
 	}
 	q := client.IssueQuery{
 		Statuses: statuses, StatusTypes: types, Labels: labels, ExcludeLabels: excludeLabels,
 		Project: *project, Parent: *parent, Assignee: *assignee, Milestone: *milestone,
-		Query: *query, UpdatedSince: *updatedSince, CompletedSince: *completedSince,
+		Query: query, UpdatedSince: *updatedSince, CompletedSince: *completedSince,
 		OrderBy: *orderBy, Limit: *limit, Offset: *offset,
 	}
 	switch {
@@ -316,6 +342,9 @@ func issueList(args []string) error {
 	}
 	if *common.jsonOut {
 		return printJSON(map[string]any{"issues": issues, "next_offset": next})
+	}
+	if flat {
+		return printIssuesFlat(issues, cols, *tsv, next)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "KEY\tSTATUS\tPRI\tPROJECT\tASSIGNEE\tLABELS\tTITLE")
@@ -404,7 +433,7 @@ func issueCreate(args []string) error {
 	title := fs.String("title", "", "issue title (required)")
 	description := fs.String("description", "", "issue description; use - to read stdin")
 	status := fs.String("status", "", "initial status (default Triage)")
-	priority := fs.Int("priority", 0, "priority 0-4 (0 none, 1 urgent, 4 low)")
+	priority := fs.String("priority", "0", "priority: 0-4 or a word (none|urgent|high|medium|low)")
 	project := fs.String("project", "", "project slug")
 	parent := fs.String("parent", "", "parent issue key")
 	assignee := fs.String("assignee", "", "assignee name (person or agent)")
@@ -421,12 +450,16 @@ func issueCreate(args []string) error {
 	if err != nil {
 		return err
 	}
+	prio, err := parsePriority(*priority)
+	if err != nil {
+		return err
+	}
 	cl, err := common.client()
 	if err != nil {
 		return err
 	}
 	issue, err := cl.CreateIssue(client.IssueCreate{
-		Title: *title, Description: desc, Status: *status, Priority: *priority,
+		Title: *title, Description: desc, Status: *status, Priority: prio,
 		Project: *project, Parent: *parent, Assignee: *assignee, Milestone: *milestone,
 		DueDate: *due, Labels: labels, Actor: *actor, IdempotencyKey: *idempotencyKey,
 	})
@@ -448,7 +481,7 @@ func issueUpdate(args []string) error {
 	replaceDescription := fs.Bool("replace-description", false, "allow --description to overwrite an existing description")
 	appendText := fs.String("append", "", "text to add to the end of the description; use - to read stdin")
 	status := fs.String("status", "", "new status")
-	priority := fs.Int("priority", 0, "new priority 0-4")
+	priority := fs.String("priority", "0", "new priority: 0-4 or a word (none|urgent|high|medium|low)")
 	project := fs.String("project", "", "project slug")
 	parent := fs.String("parent", "", "parent issue key")
 	assignee := fs.String("assignee", "", "assignee name")
@@ -502,7 +535,11 @@ func issueUpdate(args []string) error {
 		patch.Status = strp(*status)
 	}
 	if set["priority"] {
-		patch.Priority = priority
+		prio, err := parsePriority(*priority)
+		if err != nil {
+			return err
+		}
+		patch.Priority = &prio
 	}
 	for _, f := range []struct {
 		name  string
@@ -676,11 +713,15 @@ func cmdComment(args []string) error {
 	}
 	sub, rest := args[0], args[1:]
 	if sub != "edit" {
-		// A bare issue key here is almost always someone reaching for the
-		// nested command; point them at it instead of a blank "unknown
-		// subcommand".
+		// A bare issue key, or a guessed create verb, is almost always someone
+		// reaching for the nested command; point them at it instead of a blank
+		// "unknown subcommand".
 		if issueKeyRe.MatchString(sub) {
 			return usagef("to comment on an issue use: trackd issue comment %s --body <text>", sub)
+		}
+		switch sub {
+		case "create", "add", "new", "-":
+			return usagef("to comment on an issue use: trackd issue comment <key> --body <text>")
 		}
 		return usagef("unknown comment subcommand %q", sub)
 	}
@@ -1226,7 +1267,18 @@ func cmdMilestone(args []string) error {
 func cmdStatuses(args []string) error {
 	fs := flag.NewFlagSet("statuses", flag.ContinueOnError)
 	common := addCommon(fs)
-	if err := parseFlags(fs, args, "trackd statuses [flags]"); err != nil {
+	positional, err := collectArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	// `project list` and `label list` train a `list` verb; accept and ignore a
+	// single `list` so `statuses list` behaves as bare `statuses`, but keep
+	// rejecting anything else.
+	tolerated := len(positional) == 0 || (len(positional) == 1 && positional[0] == "list")
+	if !tolerated {
+		return usagef("usage: trackd statuses [flags]")
+	}
+	if err := checkEmptyFlags(fs); err != nil {
 		return err
 	}
 	cl, err := common.client()
@@ -1434,4 +1486,110 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// issueColumns are the columns the flat list output can show, in the order they
+// appear when none are named.
+var issueColumns = []string{"key", "status", "priority", "project", "assignee", "labels", "title"}
+
+// issueColumnList resolves a --columns spec to a validated column order, or all
+// columns when the spec is empty.
+func issueColumnList(spec string) ([]string, error) {
+	if strings.TrimSpace(spec) == "" {
+		return issueColumns, nil
+	}
+	parts := splitCSV(spec)
+	cols := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(p)
+		if !contains(issueColumns, p) {
+			return nil, usagef("unknown column %q; choose from %s", p, strings.Join(issueColumns, ","))
+		}
+		cols = append(cols, p)
+	}
+	return cols, nil
+}
+
+func issueColumnValue(i store.Issue, col string) string {
+	switch col {
+	case "key":
+		return i.Key
+	case "status":
+		return i.Status
+	case "priority":
+		return strconv.Itoa(i.Priority)
+	case "project":
+		return orDash(i.Project)
+	case "assignee":
+		return orDash(i.Assignee)
+	case "labels":
+		return orDash(strings.Join(i.Labels, ","))
+	case "title":
+		return truncate(i.Title, 70)
+	}
+	return ""
+}
+
+// printIssuesFlat is the lightweight queue read: only the selected columns. With
+// tsv it emits raw tab-separated records (no header, no padding, no footer) for
+// machine reading; otherwise it is a narrower aligned table with a header.
+func printIssuesFlat(issues []store.Issue, cols []string, tsv bool, next *int) error {
+	row := func(i store.Issue) string {
+		cells := make([]string, len(cols))
+		for c, col := range cols {
+			cells[c] = issueColumnValue(i, col)
+		}
+		return strings.Join(cells, "\t")
+	}
+	if tsv {
+		for _, i := range issues {
+			fmt.Println(row(i))
+		}
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	header := make([]string, len(cols))
+	for c, col := range cols {
+		header[c] = strings.ToUpper(col)
+	}
+	fmt.Fprintln(w, strings.Join(header, "\t"))
+	for _, i := range issues {
+		fmt.Fprintln(w, row(i))
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if next != nil {
+		fmt.Printf("more results: --offset %d\n", *next)
+	}
+	return nil
+}
+
+// priorityWords are the --priority words, indexed to the int the API takes; the
+// order tracks store's priority labels (none=0 ... low=4).
+var priorityWords = []string{"none", "urgent", "high", "medium", "low"}
+
+// parsePriority accepts either the 0-4 int or a case-insensitive priority word.
+func parsePriority(v string) (int, error) {
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 || n > 4 {
+			return 0, usagef("--priority %d out of range; use 0-4 or one of %s", n, strings.Join(priorityWords, ", "))
+		}
+		return n, nil
+	}
+	for i, w := range priorityWords {
+		if strings.EqualFold(v, w) {
+			return i, nil
+		}
+	}
+	return 0, usagef("--priority %q not recognised; use 0-4 or one of %s", v, strings.Join(priorityWords, ", "))
+}
+
+func contains(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }

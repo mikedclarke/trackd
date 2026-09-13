@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+// statusByName is COLLATE NOCASE, so a status named in any case resolves to
+// its stored spelling on both create and update.
+func TestStatusCaseInsensitive(t *testing.T) {
+	s := openTestStore(t)
+	issue := mustCreateIssue(t, s, IssueInput{Title: "Cased", Status: "in progress"}, "pm")
+	if issue.Status != "In Progress" {
+		t.Fatalf("create status = %q, want In Progress", issue.Status)
+	}
+	done := "DONE"
+	updated, err := s.UpdateIssue(issue.Key, IssuePatch{Status: &done}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "Done" {
+		t.Fatalf("update status = %q, want Done", updated.Status)
+	}
+}
+
 // S7
 func TestCreateIssueIdempotency(t *testing.T) {
 	s := openTestStore(t)

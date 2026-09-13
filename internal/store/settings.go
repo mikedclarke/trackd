@@ -24,6 +24,7 @@ var SettingSpecs = []SettingSpec{
 	{Key: "issue_seq", Description: "the last issue number handed out (read-only)", ReadOnly: true},
 	{Key: "label_groups", Description: `JSON array of label groups, e.g. [["ready","blocked"]]; an issue holds at most one label from each group`},
 	{Key: "base_url", Description: "public URL of the server, used to fill each issue's url field; empty leaves it out"},
+	{Key: "agent_label", Description: "label auto-applied to issues created by non-admin tokens; empty disables it"},
 }
 
 // SettingValue is one row of `trackd setting list`.
@@ -82,6 +83,15 @@ func ValidateSetting(key, value string) error {
 		u, err := url.Parse(value)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("base_url must be an http or https URL, got %q", value)
+		}
+	case "agent_label":
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		// The auto-apply create rejects a name it cannot resolve, so the value
+		// has to be a name a label can carry; validTitle is that same rule.
+		if _, err := validTitle("agent_label", value); err != nil {
+			return err
 		}
 	}
 	return nil

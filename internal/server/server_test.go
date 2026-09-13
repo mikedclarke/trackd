@@ -552,6 +552,54 @@ func TestReplaceDescriptionNeedsAdmin(t *testing.T) {
 	})
 }
 
+// agent_label, when set, is auto-applied to issues created by a non-admin
+// token so an operator can mark every agent-created issue. Admin creates are
+// left alone, and a label the caller passed is not added twice.
+func TestAgentLabelAutoApply(t *testing.T) {
+	e := newTestEnv(t)
+	admin := e.adminToken()
+
+	// Unset by default: neither role gets an extra label.
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "no setting"}, http.StatusCreated, &issue)
+	if len(issue.Labels) != 0 {
+		t.Fatalf("agent create with agent_label unset = %v", issue.Labels)
+	}
+	e.withToken(admin, func() {
+		var adminIssue store.Issue
+		e.expect("POST", "/api/v1/issues", map[string]any{"title": "admin no setting"}, http.StatusCreated, &adminIssue)
+		if len(adminIssue.Labels) != 0 {
+			t.Fatalf("admin create with agent_label unset = %v", adminIssue.Labels)
+		}
+	})
+
+	if err := e.store.SetSetting("agent_label", "agent"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent create carries the label, which is created on demand.
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "agent made"}, http.StatusCreated, &issue)
+	if len(issue.Labels) != 1 || issue.Labels[0] != "agent" {
+		t.Fatalf("agent create = %v, want [agent]", issue.Labels)
+	}
+
+	// Admin create does not.
+	e.withToken(admin, func() {
+		var adminIssue store.Issue
+		e.expect("POST", "/api/v1/issues", map[string]any{"title": "admin made"}, http.StatusCreated, &adminIssue)
+		if len(adminIssue.Labels) != 0 {
+			t.Fatalf("admin create = %v, want no label", adminIssue.Labels)
+		}
+	})
+
+	// An explicit pass of the same label is not doubled.
+	e.label("other")
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "explicit", "labels": []string{"agent", "other"}}, http.StatusCreated, &issue)
+	if len(issue.Labels) != 2 || issue.Labels[0] != "agent" || issue.Labels[1] != "other" {
+		t.Fatalf("explicit pass = %v, want [agent other]", issue.Labels)
+	}
+}
+
 func TestLabelOperations(t *testing.T) {
 	e := newTestEnv(t)
 	if err := e.store.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
