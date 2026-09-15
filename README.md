@@ -1,7 +1,8 @@
 # trackd
 
 Self-hosted task and project tracking for AI agents. One binary, one SQLite file,
-three interfaces: REST API, CLI, and MCP, plus a read-only web board for humans.
+three interfaces: REST API, CLI, and MCP, plus a web board for humans: browse,
+filter, and comment; every other write stays with the agents' interfaces.
 
 ![the trackd board](docs/board.jpeg)
 
@@ -84,7 +85,13 @@ trackd issue comment TSK-1 --body "done, see the PR" --actor builder
 trackd issue show TSK-1
 ```
 
-Open the same URL in a browser for the read-only board (sign in with a token).
+Open the same URL in a browser for the web board (sign in with a token; the
+browser stays signed in until you sign out, across server restarts). The board
+filters by project, label, and assignee, and a filtered URL like
+`/?label=needs-review` is a bookmarkable view. The issue page takes comments,
+attributed to the token you signed in with; "use as reply" copies an existing
+comment into the reply box, which makes approve-by-reply workflows a two-tap
+affair on a phone.
 
 ## Concepts
 

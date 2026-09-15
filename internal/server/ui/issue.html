@@ -31,17 +31,34 @@
   </ul>
   {{end}}
 
+  <h2 id="comments">comments</h2>
   {{if .Comments}}
-  <h2>comments</h2>
   <div class="comments">
     {{range .Comments}}
     <div class="comment">
-      <div class="comment-head"><span class="actor">{{if .Actor}}{{.Actor}}{{else}}unknown{{end}}</span> <span class="when">{{shortTime .CreatedAt}}</span></div>
+      <div class="comment-head"><span class="actor">{{if .Actor}}{{.Actor}}{{else}}unknown{{end}}</span> <span class="when">{{shortTime .CreatedAt}}</span> <button type="button" class="use-reply" data-body="{{.Body}}" title="copy this comment into the reply box">use as reply</button></div>
       <div class="comment-body">{{.Body}}</div>
     </div>
     {{end}}
   </div>
   {{end}}
+
+  <form class="comment-form" method="post" action="/ui/issue/{{.Issue.Key}}/comments">
+    <textarea id="comment-body" name="body" rows="4" placeholder="Write a comment…" required></textarea>
+    <div class="comment-form-foot">
+      <span class="as">commenting as {{.Actor}}</span>
+      <button type="submit">Comment</button>
+    </div>
+  </form>
+  <script>
+    for (const button of document.querySelectorAll('.use-reply')) {
+      button.addEventListener('click', () => {
+        const box = document.getElementById('comment-body');
+        box.value = button.dataset.body;
+        box.focus();
+      });
+    }
+  </script>
 
   {{if .Events}}
   <h2>activity</h2>

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,6 +42,14 @@ var (
 
 const uiCookie = "trackd_session"
 
+// uiSessionTTL is how long a web login lasts. Every authenticated page view
+// after uiSessionRenewAfter pushes the expiry out again, so a board someone
+// actually visits stays signed in indefinitely and an abandoned session dies.
+const (
+	uiSessionTTL        = 30 * 24 * time.Hour
+	uiSessionRenewAfter = 24 * time.Hour
+)
+
 // newSessionID mints the opaque value the browser holds. The API token never
 // travels in a cookie: a stolen cookie buys a session on a server that can
 // revoke it, not a credential that works everywhere.
@@ -51,30 +61,17 @@ func newSessionID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// sessions live in memory only, so a restart signs everyone out. That is the
-// intended lifetime for a read-only board behind a private network.
-func (s *Server) startSession(tokenName string) (string, error) {
+// startSession records a durable session for a verified token, so a server
+// restart does not sign every browser out.
+func (s *Server) startSession(token *store.Token) (string, error) {
 	id, err := newSessionID()
 	if err != nil {
 		return "", err
 	}
-	s.mu.Lock()
-	s.sessions[id] = tokenName
-	s.mu.Unlock()
+	if err := s.store.CreateUISession(id, token.ID, uiSessionTTL); err != nil {
+		return "", err
+	}
 	return id, nil
-}
-
-func (s *Server) session(id string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	name, ok := s.sessions[id]
-	return name, ok
-}
-
-func (s *Server) endSession(id string) {
-	s.mu.Lock()
-	delete(s.sessions, id)
-	s.mu.Unlock()
 }
 
 // secureCookie reports whether the browser reached us over TLS, directly or
@@ -98,11 +95,18 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, id str
 func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cookie, err := r.Cookie(uiCookie); err == nil {
-			if name, ok := s.session(cookie.Value); ok {
-				if info, ok := r.Context().Value(requestKey).(*requestInfo); ok {
-					info.actor = name
+			if session, err := s.store.UISession(cookie.Value); err == nil {
+				// A visit a day or more into the session slides the expiry
+				// out again; a renewal that fails only shortens the session,
+				// so it is logged rather than failing the page.
+				if time.Until(session.ExpiresAt) < uiSessionTTL-uiSessionRenewAfter {
+					if err := s.store.RenewUISession(cookie.Value, uiSessionTTL); err != nil {
+						log.Printf("renew ui session: %v", err)
+					} else {
+						s.setSessionCookie(w, r, cookie.Value, int(uiSessionTTL/time.Second))
+					}
 				}
-				next(w, r)
+				s.serveAs(next, w, r, session.TokenName)
 				return
 			}
 		}
@@ -110,15 +114,22 @@ func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 		// health probe reads a page without holding a session.
 		if header, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 			if token, err := s.store.VerifyToken(header); err == nil {
-				if info, ok := r.Context().Value(requestKey).(*requestInfo); ok {
-					info.actor = token.Name
-				}
-				next(w, r)
+				s.serveAs(next, w, r, token.Name)
 				return
 			}
 		}
 		http.Redirect(w, r, "/ui/login", http.StatusSeeOther)
 	}
+}
+
+// serveAs runs a UI handler with the signed-in token's name on the request:
+// in requestInfo for the log line, and in the context for handlers that
+// attribute writes.
+func (s *Server) serveAs(next http.HandlerFunc, w http.ResponseWriter, r *http.Request, name string) {
+	if info, ok := r.Context().Value(requestKey).(*requestInfo); ok {
+		info.actor = name
+	}
+	next(w, r.WithContext(context.WithValue(r.Context(), uiActorKey, name)))
 }
 
 func (s *Server) uiLoginForm(w http.ResponseWriter, r *http.Request) {
@@ -133,18 +144,20 @@ func (s *Server) uiLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, loginTemplate, map[string]any{"Title": "sign in", "Error": "That token was not accepted. Check it and try again."})
 		return
 	}
-	id, err := s.startSession(token.Name)
+	id, err := s.startSession(token)
 	if err != nil {
 		http.Error(w, "could not start a session", http.StatusInternalServerError)
 		return
 	}
-	s.setSessionCookie(w, r, id, 30*24*60*60)
+	s.setSessionCookie(w, r, id, int(uiSessionTTL/time.Second))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(uiCookie); err == nil {
-		s.endSession(cookie.Value)
+		if err := s.store.DeleteUISession(cookie.Value); err != nil {
+			log.Printf("delete ui session: %v", err)
+		}
 	}
 	s.setSessionCookie(w, r, "", -1)
 	http.Redirect(w, r, "/ui/login", http.StatusSeeOther)
@@ -285,6 +298,7 @@ func (s *Server) uiIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	actor, _ := r.Context().Value(uiActorKey).(string)
 	s.render(w, issueTemplate, map[string]any{
 		"Title":     issue.Key,
 		"Issue":     issue,
@@ -292,7 +306,54 @@ func (s *Server) uiIssue(w http.ResponseWriter, r *http.Request) {
 		"Comments":  comments,
 		"Relations": relations,
 		"Events":    events,
+		"Actor":     actor,
 	})
+}
+
+// uiIssueComment accepts the issue page's comment form. The session cookie is
+// SameSite=Lax, so a cross-site POST never carries it; checking Origin against
+// the host we were addressed as is the second lock on the same door.
+func (s *Server) uiIssueComment(w http.ResponseWriter, r *http.Request) {
+	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r) {
+		http.Error(w, "cross-origin form post refused", http.StatusForbidden)
+		return
+	}
+	key := r.PathValue("key")
+	back := "/ui/issue/" + url.PathEscape(key)
+	body := r.PostFormValue("body")
+	if strings.TrimSpace(body) == "" {
+		// The form marks the field required; an empty post can only come from
+		// something odd, and an empty comment is never worth an error page.
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	actor, _ := r.Context().Value(uiActorKey).(string)
+	if _, _, err := s.store.AddComment(key, store.CommentInput{Body: body}, actor); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, back+"#comments", http.StatusSeeOther)
+}
+
+// sameOrigin reports whether a browser-supplied Origin names this server: the
+// host the request reached directly, or the public host a reverse proxy
+// forwarded for.
+func sameOrigin(origin string, r *http.Request) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	if forwarded, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ","); forwarded != "" {
+		return strings.EqualFold(u.Host, strings.TrimSpace(forwarded))
+	}
+	return false
 }
 
 func (s *Server) render(w http.ResponseWriter, t *template.Template, data map[string]any) {

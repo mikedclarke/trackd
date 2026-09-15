@@ -266,3 +266,157 @@ func TestUIBoardAndIssue(t *testing.T) {
 		t.Errorf("stylesheet = %d", code)
 	}
 }
+
+// A durable session means a server restart no longer signs every browser out:
+// the same cookie works against a new process over the same store.
+func TestUISessionSurvivesRestart(t *testing.T) {
+	ts, client, token, st := newUIEnv(t)
+	resp, err := client.PostForm(ts.URL+"/ui/login", url.Values{"token": {token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	base, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookies := client.Jar.Cookies(base)
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %+v", cookies)
+	}
+	ts.Close()
+
+	restarted := httptest.NewServer(New(st, "test").Handler())
+	defer restarted.Close()
+	req, err := http.NewRequest("GET", restarted.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(cookies[0])
+	bare := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	reply, err := bare.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reply.Body.Close()
+	if reply.StatusCode != http.StatusOK {
+		t.Errorf("board after restart = %d, want 200", reply.StatusCode)
+	}
+}
+
+func TestUICommentForm(t *testing.T) {
+	ts, client, token, st := newUIEnv(t)
+	issue, _, err := st.CreateIssue(store.IssueInput{Title: "Comment target", Status: "Todo"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.PostForm(ts.URL+"/ui/login", url.Values{"token": {token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	resp, err = client.PostForm(ts.URL+"/ui/issue/"+issue.Key+"/comments", url.Values{"body": {"Approved: ship it"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	comments, err := st.ListComments(issue.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Body != "Approved: ship it" {
+		t.Fatalf("comments = %+v", comments)
+	}
+	// The comment is attributed to the signed-in token, not typed identity.
+	if comments[0].Actor != "pm" {
+		t.Errorf("actor = %q, want pm", comments[0].Actor)
+	}
+	code, body := fetch(t, client, ts.URL+"/ui/issue/"+issue.Key)
+	if code != http.StatusOK || !strings.Contains(body, "Approved: ship it") {
+		t.Errorf("issue page after comment = %d, comment not shown", code)
+	}
+	if !strings.Contains(body, "commenting as pm") {
+		t.Error("issue page does not name the signed-in token")
+	}
+
+	// An empty body posts nothing and lands back on the issue.
+	resp, err = client.PostForm(ts.URL+"/ui/issue/"+issue.Key+"/comments", url.Values{"body": {"   "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if comments, err = st.ListComments(issue.Key); err != nil || len(comments) != 1 {
+		t.Errorf("blank comment stored: %v %d", err, len(comments))
+	}
+}
+
+func TestUICommentRequiresSession(t *testing.T) {
+	ts, _, _, st := newUIEnv(t)
+	issue, _, err := st.CreateIssue(store.IssueInput{Title: "Comment target", Status: "Todo"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := bare.PostForm(ts.URL+"/ui/issue/"+issue.Key+"/comments", url.Values{"body": {"drive-by"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("unauthenticated comment = %d, want a redirect to login", resp.StatusCode)
+	}
+	if comments, err := st.ListComments(issue.Key); err != nil || len(comments) != 0 {
+		t.Errorf("unauthenticated comment stored: %v %d", err, len(comments))
+	}
+}
+
+func TestUICommentRefusesCrossOrigin(t *testing.T) {
+	ts, client, token, st := newUIEnv(t)
+	issue, _, err := st.CreateIssue(store.IssueInput{Title: "Comment target", Status: "Todo"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.PostForm(ts.URL+"/ui/login", url.Values{"token": {token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	form := url.Values{"body": {"forged"}}
+	req, err := http.NewRequest("POST", ts.URL+"/ui/issue/"+issue.Key+"/comments", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://evil.example")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-origin comment = %d, want 403", resp.StatusCode)
+	}
+	if comments, err := st.ListComments(issue.Key); err != nil || len(comments) != 0 {
+		t.Errorf("cross-origin comment stored: %v %d", err, len(comments))
+	}
+
+	// The same-origin form post, which sends a matching Origin, still works,
+	// as does a proxied post whose Origin names the forwarded host.
+	req, err = http.NewRequest("POST", ts.URL+"/ui/issue/"+issue.Key+"/comments", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://tracker.example")
+	req.Header.Set("X-Forwarded-Host", "tracker.example")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if comments, err := st.ListComments(issue.Key); err != nil || len(comments) != 1 {
+		t.Errorf("forwarded-host comment not stored: %v %d", err, len(comments))
+	}
+}

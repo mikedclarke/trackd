@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="login">
   <h1>trackd<span class="cursor">▮</span></h1>
-  <p>Paste an API token to view the board.</p>
+  <p>Paste an API token to use the board. This browser stays signed in until you sign out.</p>
   {{if .Error}}<p class="login-error">{{.Error}}</p>{{end}}
   <form method="post" action="/ui/login">
     <input type="password" name="token" placeholder="td_…" autofocus autocomplete="off" required>

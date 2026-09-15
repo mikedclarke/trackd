@@ -7,6 +7,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Web board logins are durable: sessions persist in the database (hashed, like
+  API tokens), survive server restarts, and slide their 30-day expiry on use,
+  so a browser stays signed in until it signs out. Revoking a token ends its
+  sessions. Migration `0004_ui_sessions.sql`; /healthz now reports schema 4.
+- The issue page takes comments: posted as the signed-in token, attributed and
+  audited exactly like an API comment. A "use as reply" button on each comment
+  copies its body into the reply box, so reply-with-this-text flows (reviews,
+  approvals) work from a phone. Cross-origin form posts are refused.
+
+### Changed
+
+- The web board is no longer described as read-only; commenting is the one
+  write it offers. All other writes stay with the API, CLI, and MCP.
+
 ## [0.2.0] - 2026-09-13
 
 ### Added

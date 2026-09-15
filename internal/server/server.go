@@ -1,6 +1,7 @@
 // Package server exposes the store over HTTP: a bearer-token-authenticated
 // JSON API under /api/v1, an unauthenticated /healthz, an MCP endpoint, a
-// read-only web UI, and the background backup and integrity checkers.
+// web UI (read everything, write comments), and the background backup and
+// integrity checkers.
 package server
 
 import (
@@ -33,8 +34,8 @@ const (
 // schemaVersion is the store's migration count, reported by /healthz so a
 // client can tell which contract it is talking to. The store does not expose
 // the number; bump this when a migration is added (latest is
-// internal/store/migrations/0003_cutover.sql).
-const schemaVersion = 3
+// internal/store/migrations/0004_ui_sessions.sql).
+const schemaVersion = 4
 
 // healthCheckEvery is how often the background checker runs PRAGMA
 // quick_check. Cheap on a database this size, and rare enough that a wedged
@@ -55,7 +56,6 @@ type Server struct {
 	backupDir     string
 	backupEvery   time.Duration
 	healthRunning bool
-	sessions      map[string]string
 }
 
 type backupStatus struct {
@@ -69,7 +69,7 @@ type integrityStatus struct {
 }
 
 func New(st *store.Store, version string) *Server {
-	return &Server{store: st, version: version, sessions: map[string]string{}}
+	return &Server{store: st, version: version}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -106,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/mcp", s.auth(s.mcpHandler()))
 	mux.HandleFunc("GET /{$}", s.uiAuth(s.uiBoard))
 	mux.HandleFunc("GET /ui/issue/{key}", s.uiAuth(s.uiIssue))
+	mux.HandleFunc("POST /ui/issue/{key}/comments", s.uiAuth(s.uiIssueComment))
 	mux.HandleFunc("GET /ui/login", s.uiLoginForm)
 	mux.HandleFunc("POST /ui/login", s.uiLoginSubmit)
 	mux.HandleFunc("GET /ui/logout", s.uiLogout)
@@ -125,6 +126,10 @@ type ctxKey int
 const (
 	tokenKey ctxKey = iota
 	requestKey
+	// uiActorKey carries the signed-in token's name from uiAuth to the UI
+	// handlers, so a comment posted from the board is attributed exactly like
+	// one posted over the API.
+	uiActorKey
 )
 
 // requestInfo carries what the log line needs but only the inner handlers
