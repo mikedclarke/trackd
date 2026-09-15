@@ -320,7 +320,9 @@ func (s *Server) uiIssueComment(w http.ResponseWriter, r *http.Request) {
 	}
 	key := r.PathValue("key")
 	back := "/ui/issue/" + url.PathEscape(key)
-	body := r.PostFormValue("body")
+	// Browsers form-post textarea lines as CRLF; store the comment with the
+	// same line endings an API client would send.
+	body := strings.ReplaceAll(r.PostFormValue("body"), "\r\n", "\n")
 	if strings.TrimSpace(body) == "" {
 		// The form marks the field required; an empty post can only come from
 		// something odd, and an empty comment is never worth an error page.

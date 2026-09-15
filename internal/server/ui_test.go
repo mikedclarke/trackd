@@ -340,13 +340,28 @@ func TestUICommentForm(t *testing.T) {
 		t.Error("issue page does not name the signed-in token")
 	}
 
+	// A CRLF body (how a browser form-posts a textarea) is stored with LF,
+	// matching what an API client would send.
+	resp, err = client.PostForm(ts.URL+"/ui/issue/"+issue.Key+"/comments", url.Values{"body": {"line one\r\nline two"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	comments, err = st.ListComments(issue.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 2 || comments[1].Body != "line one\nline two" {
+		t.Fatalf("CRLF comment stored as %q", comments[len(comments)-1].Body)
+	}
+
 	// An empty body posts nothing and lands back on the issue.
 	resp, err = client.PostForm(ts.URL+"/ui/issue/"+issue.Key+"/comments", url.Values{"body": {"   "}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if comments, err = st.ListComments(issue.Key); err != nil || len(comments) != 1 {
+	if comments, err = st.ListComments(issue.Key); err != nil || len(comments) != 2 {
 		t.Errorf("blank comment stored: %v %d", err, len(comments))
 	}
 }
