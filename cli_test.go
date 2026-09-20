@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestExitCode(t *testing.T) {
 	}{
 		{"success", nil, 0},
 		{"usage", usagef("bad flag"), 2},
-		{"help", flag.ErrHelp, 2},
+		{"help", flag.ErrHelp, 0},
 		{"validation", &client.APIError{Status: 400, Code: "validation"}, 2},
 		{"invalid reference", &client.APIError{Status: 422, Code: "invalid_ref"}, 2},
 		{"not found", &client.APIError{Status: 404, Code: "not_found"}, 3},
@@ -99,12 +100,14 @@ func TestUndefinedFlagIsAUsageError(t *testing.T) {
 		})
 	}
 
-	// A help request stays a help request: main prints no error line for it.
+	// A help request is not a failure: it carries flag.ErrHelp, the usage was
+	// already printed, and it exits 0 so a script piping `--help` does not read
+	// it as an error.
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	addCommon(fs)
 	err := parseFlags(fs, []string{"--help"}, "trackd issue list [flags]")
-	if !errors.Is(err, flag.ErrHelp) || exitCode(err) != 2 {
-		t.Errorf("--help = %v (exit %d), want flag.ErrHelp and exit 2", err, exitCode(err))
+	if !errors.Is(err, flag.ErrHelp) || exitCode(err) != 0 {
+		t.Errorf("--help = %v (exit %d), want flag.ErrHelp and exit 0", err, exitCode(err))
 	}
 }
 
@@ -355,25 +358,76 @@ func TestOneOf(t *testing.T) {
 	}
 }
 
-// `trackd comment GDL-1` is almost always someone reaching for the nested
-// `issue comment`; the error points them there instead of a blank "unknown
-// subcommand". A non-key subcommand still gets the plain error.
-func TestCommentIssueKeyHint(t *testing.T) {
-	err := cmdComment([]string{"GDL-1"})
+// `trackd comment <key>` is an alias for `trackd issue comment <key>`: a bare
+// key routes to the add path. With a body it posts; without one it falls
+// through to that command's own usage, which names the nested command. A
+// non-key, non-verb subcommand still gets the plain unknown-subcommand error.
+func TestCommentKeyRoutesToAdd(t *testing.T) {
+	// No body: routes to issue comment, whose usage error points there.
+	t.Setenv("TRACKD_TOKEN", "td_test")
+	t.Setenv("TRACKD_URL", "http://127.0.0.1:1")
+	err := cmdComment([]string{"TSK-1"})
 	var usage *usageError
 	if !errors.As(err, &usage) {
-		t.Fatalf("comment GDL-1 = %v, want a usage error", err)
+		t.Fatalf("comment TSK-1 = %v, want a usage error", err)
 	}
-	if !strings.Contains(err.Error(), "trackd issue comment GDL-1") {
-		t.Errorf("hint = %q, want it to point at `trackd issue comment`", err.Error())
+	if !strings.Contains(err.Error(), "trackd issue comment") {
+		t.Errorf("usage = %q, want it to name `trackd issue comment`", err.Error())
 	}
 	if exitCode(err) != 2 {
 		t.Errorf("exit code = %d, want 2", exitCode(err))
 	}
 
+	// With a body: the alias posts the comment, hitting the add endpoint.
+	var gotPath, gotMethod string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"id": 7, "issue_key": "TSK-1", "actor": "td_test"}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	captureStdout(t, func() {
+		if err := cmdComment([]string{"TSK-1", "--body", "hello"}); err != nil {
+			t.Errorf("comment TSK-1 --body = %v, want nil", err)
+		}
+	})
+	if gotMethod != "POST" || gotPath != "/api/v1/issues/TSK-1/comments" {
+		t.Errorf("alias hit %s %s, want POST /api/v1/issues/TSK-1/comments", gotMethod, gotPath)
+	}
+
 	err = cmdComment([]string{"nope"})
 	if !errors.As(err, &usage) || !strings.Contains(err.Error(), "unknown comment subcommand") {
 		t.Errorf("comment nope = %v, want the plain unknown-subcommand error", err)
+	}
+}
+
+// `trackd comment list <key>` lists an issue's comments with their ids so a
+// caller does not have to guess one.
+func TestCommentList(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/issues/TSK-1/comments" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"comments": []any{map[string]any{"id": 3, "issue_key": "TSK-1", "actor": "alex", "body": "first"}},
+		}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+	out := captureStdout(t, func() {
+		if err := cmdComment([]string{"list", "TSK-1"}); err != nil {
+			t.Errorf("comment list = %v, want nil", err)
+		}
+	})
+	if !strings.Contains(out, "3") || !strings.Contains(out, "first") {
+		t.Errorf("output = %q, want the comment id and body", out)
 	}
 }
 
@@ -402,6 +456,78 @@ func TestClientRequiresToken(t *testing.T) {
 	t.Setenv("TRACKD_TOKEN", "td_test")
 	if _, err := common.client(); err != nil {
 		t.Errorf("client() with a token = %v, want nil", err)
+	}
+}
+
+// A token can come from a file named by $TRACKD_TOKEN_FILE, so a caller can
+// keep the credential out of the environment. The file's trailing newline is
+// trimmed.
+func TestClientTokenFromFile(t *testing.T) {
+	t.Setenv("TRACKD_TOKEN", "")
+	t.Setenv("TRACKD_URL", "")
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("td_from_file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TRACKD_TOKEN_FILE", path)
+
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	common := addCommon(fs)
+	if _, err := parseArgs(fs, nil, 0, "t"); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, err := common.client(); err != nil {
+		t.Errorf("client() with a token file = %v, want nil", err)
+	}
+
+	// A missing file is reported, not silently ignored.
+	t.Setenv("TRACKD_TOKEN_FILE", filepath.Join(t.TempDir(), "absent"))
+	if _, err := common.client(); err == nil {
+		t.Error("client() with a missing token file = nil, want an error")
+	}
+}
+
+// A bare issue verb at the top level (`trackd show TSK-1`) is the common wrong
+// guess; the error names the real command instead of dumping the usage screen.
+func TestTopLevelDidYouMean(t *testing.T) {
+	for _, cmd := range []string{"show", "list", "create", "update", "append", "relate"} {
+		err := run([]string{cmd})
+		if err == nil || !strings.Contains(err.Error(), "did you mean") ||
+			!strings.Contains(err.Error(), "trackd issue "+cmd) {
+			t.Errorf("run %q = %v, want a `did you mean trackd issue %s` hint", cmd, err, cmd)
+		}
+	}
+	// A genuinely unknown command keeps the plain error.
+	if err := run([]string{"frobnicate"}); err == nil || strings.Contains(err.Error(), "did you mean") {
+		t.Errorf("run frobnicate = %v, want the plain unknown-command error", err)
+	}
+}
+
+// The list commands print an enveloped object under --json, matching the HTTP
+// API, rather than a bare array a caller has to special-case.
+func TestListJSONIsEnveloped(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"projects": []any{map[string]any{"slug": "acme", "status": "started", "name": "Acme"}},
+		}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+	out := captureStdout(t, func() {
+		if err := projectList([]string{"--json"}); err != nil {
+			t.Errorf("project list --json = %v", err)
+		}
+	})
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("output is not a JSON object: %v (%q)", err, out)
+	}
+	if _, ok := env["projects"]; !ok {
+		t.Errorf("output = %q, want a {\"projects\": [...]} envelope", out)
 	}
 }
 

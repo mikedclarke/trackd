@@ -48,13 +48,27 @@ func (c *commonFlags) client() (*client.Client, error) {
 		token = os.Getenv("TRACKD_TOKEN")
 	}
 	if token == "" {
+		// A token file keeps the credential out of the environment and the
+		// process table, which is what a secret manager or a systemd
+		// LoadCredential drop-in hands you.
+		if path := os.Getenv("TRACKD_TOKEN_FILE"); path != "" {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("reading $TRACKD_TOKEN_FILE %s: %w", path, err)
+			}
+			token = strings.TrimSpace(string(b))
+		}
+	}
+	if token == "" {
 		// Catch the common "forgot to authenticate" case here rather than
 		// after a wasted round-trip. Reusing APIError keeps the exit code (4)
-		// and the "unauthorized" machine code identical to a server 401.
+		// and the "unauthorized" machine code identical to a server 401. The
+		// message names the URL it would have talked to, so a caller pointed at
+		// the wrong server sees it here.
 		return nil, &client.APIError{
 			Status:  http.StatusUnauthorized,
 			Code:    "unauthorized",
-			Message: "no API token set (set $TRACKD_TOKEN or pass --token)",
+			Message: fmt.Sprintf("no API token set for %s (set $TRACKD_TOKEN, pass --token, or point $TRACKD_TOKEN_FILE at a file holding one)", base),
 		}
 	}
 	return client.New(base, token), nil
@@ -70,7 +84,7 @@ func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
 }
 
-// issueKeyRe matches an issue key like GDL-742. It is prefix-agnostic so it
+// issueKeyRe matches an issue key like TSK-742. It is prefix-agnostic so it
 // works whatever issue_prefix a server is configured with.
 var issueKeyRe = regexp.MustCompile(`^[A-Z]+-\d+$`)
 
@@ -478,7 +492,7 @@ func issueUpdate(args []string) error {
 	common := addCommon(fs)
 	title := fs.String("title", "", "new title")
 	description := fs.String("description", "", "replacement description; use - to read stdin (needs --replace-description when one is already written)")
-	replaceDescription := fs.Bool("replace-description", false, "allow --description to overwrite an existing description")
+	replaceDescription := fs.Bool("replace-description", false, "allow --description to overwrite an existing description (admin token only)")
 	appendText := fs.String("append", "", "text to add to the end of the description; use - to read stdin")
 	status := fs.String("status", "", "new status")
 	priority := fs.String("priority", "0", "new priority: 0-4 or a word (none|urgent|high|medium|low)")
@@ -492,7 +506,7 @@ func issueUpdate(args []string) error {
 	fs.Var(&addLabels, "add-label", "label to add, keeping the others (repeatable)")
 	fs.Var(&removeLabels, "remove-label", "label to remove (repeatable)")
 	expectedVersion := fs.Int64("expected-version", -1, "fail with a conflict unless the issue is still at this version")
-	clearDescription := clearFlag(fs, "description", "description (implies --replace-description)")
+	clearDescription := clearFlag(fs, "description", "description (implies --replace-description; admin token only)")
 	clearLabels := clearFlag(fs, "labels", "whole label set")
 	clearProject := clearFlag(fs, "project", "project")
 	clearParent := clearFlag(fs, "parent", "parent")
@@ -613,6 +627,15 @@ func issueUpdate(args []string) error {
 	}
 	issue, err := c.UpdateIssue(key, patch)
 	if err != nil {
+		// Replacing a description is admin-only; when an agent token is refused,
+		// point at the append path that is open to it rather than leaving the
+		// bare "forbidden".
+		if patch.ReplaceDescription {
+			var apiErr *client.APIError
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden {
+				return fmt.Errorf("%w; to add to the description instead use: trackd issue append %s --text -", err, key)
+			}
+		}
 		return err
 	}
 	return reportIssue(issue, *common.jsonOut, "updated")
@@ -708,29 +731,68 @@ func issueComment(args []string) error {
 }
 
 func cmdComment(args []string) error {
-	if done, err := groupUsage(args, "usage: trackd comment edit <id> --body <text> [flags]"); done {
+	if done, err := groupUsage(args, "usage: trackd comment <list|edit> [flags]; to add a comment: trackd issue comment <key> --body <text>"); done {
 		return err
 	}
 	sub, rest := args[0], args[1:]
-	if sub != "edit" {
-		// A bare issue key, or a guessed create verb, is almost always someone
-		// reaching for the nested command; point them at it instead of a blank
-		// "unknown subcommand".
-		if issueKeyRe.MatchString(sub) {
-			return usagef("to comment on an issue use: trackd issue comment %s --body <text>", sub)
-		}
-		switch sub {
-		case "create", "add", "new", "-":
-			return usagef("to comment on an issue use: trackd issue comment <key> --body <text>")
-		}
-		return usagef("unknown comment subcommand %q", sub)
+	// A bare issue key means "add a comment to this issue": accept it as an
+	// alias for `issue comment` so the natural guess just works. `trackd
+	// comment TSK-1 --body ...` and `trackd issue comment TSK-1 --body ...` are
+	// the same command.
+	if issueKeyRe.MatchString(sub) {
+		return issueComment(args)
 	}
+	switch sub {
+	case "list":
+		return commentList(rest)
+	case "edit":
+		return commentEdit(rest)
+	case "create", "add", "new", "-":
+		return usagef("to add a comment use: trackd issue comment <key> --body <text>")
+	default:
+		return usagef("unknown comment subcommand %q; use `trackd comment list <key>`, `trackd comment edit <id>`, or `trackd issue comment <key> --body <text>`", sub)
+	}
+}
+
+// commentList shows an issue's comments with their ids, so a caller editing or
+// replying to one reads the id off the list instead of guessing it.
+func commentList(args []string) error {
+	fs := flag.NewFlagSet("comment list", flag.ContinueOnError)
+	common := addCommon(fs)
+	lead, err := parseArgs(fs, args, 1, "trackd comment list <key> [flags]")
+	if err != nil {
+		return err
+	}
+	cl, err := common.client()
+	if err != nil {
+		return err
+	}
+	comments, err := cl.ListComments(lead[0])
+	if err != nil {
+		return err
+	}
+	if *common.jsonOut {
+		return printJSON(map[string]any{"comments": comments})
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tCREATED\tACTOR\tREPLY-TO\tBODY")
+	for _, c := range comments {
+		reply := "-"
+		if c.ParentID != 0 {
+			reply = strconv.FormatInt(c.ParentID, 10)
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", c.ID, c.CreatedAt, orDash(c.Actor), reply, truncate(c.Body, 60))
+	}
+	return w.Flush()
+}
+
+func commentEdit(args []string) error {
 	fs := flag.NewFlagSet("comment edit", flag.ContinueOnError)
 	common := addCommon(fs)
 	bodyFlag := fs.String("body", "", "replacement body (required); use - to read stdin")
 	textAlias := fs.String("text", "", "alias for --body")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	lead, err := parseArgs(fs, rest, 1, "trackd comment edit <id> --body <text> [flags]")
+	lead, err := parseArgs(fs, args, 1, "trackd comment edit <id> --body <text> [flags]")
 	if err != nil {
 		return err
 	}
@@ -783,7 +845,7 @@ func issueRelate(args []string) error {
 		return err
 	}
 	if *common.jsonOut {
-		return printJSON(relations)
+		return printJSON(map[string]any{"relations": relations, "removed": removed})
 	}
 	// Removing a relation that was not there is not a failure, so say which of
 	// the two happened rather than leaving the caller to diff the list.
@@ -820,7 +882,7 @@ func issueEvents(args []string) error {
 		return err
 	}
 	if *common.jsonOut {
-		return printJSON(events)
+		return printJSON(map[string]any{"events": events})
 	}
 	return printEvents(events, false)
 }
@@ -910,7 +972,7 @@ func projectList(args []string) error {
 		return err
 	}
 	if *common.jsonOut {
-		return printJSON(projects)
+		return printJSON(map[string]any{"projects": projects})
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "SLUG\tSTATUS\tSTART\tTARGET\tLABELS\tNAME")
@@ -1106,7 +1168,7 @@ func cmdLabel(args []string) error {
 			return err
 		}
 		if *common.jsonOut {
-			return printJSON(labels)
+			return printJSON(map[string]any{"labels": labels})
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "NAME\tCOLOR")
@@ -1163,7 +1225,7 @@ func cmdMilestone(args []string) error {
 			return err
 		}
 		if *common.jsonOut {
-			return printJSON(milestones)
+			return printJSON(map[string]any{"milestones": milestones})
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "ID\tPROJECT\tNAME\tTARGET\tARCHIVED")
@@ -1290,7 +1352,7 @@ func cmdStatuses(args []string) error {
 		return err
 	}
 	if *common.jsonOut {
-		return printJSON(statuses)
+		return printJSON(map[string]any{"statuses": statuses})
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tTYPE")
@@ -1397,8 +1459,13 @@ func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+	// An explicit help request is a success: the usage text has already been
+	// printed, and a caller that asked for help did not hit an error.
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	var usage *usageError
-	if errors.As(err, &usage) || errors.Is(err, flag.ErrHelp) {
+	if errors.As(err, &usage) {
 		return 2
 	}
 	var apiErr *client.APIError

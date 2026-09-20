@@ -18,7 +18,7 @@ import (
 	"github.com/mikedclarke/trackd/internal/store"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	err := run(os.Args[1:])
@@ -26,9 +26,10 @@ func main() {
 		return
 	}
 	// --json callers parse stdout, so the machine-readable error goes there and
-	// the human line to stderr. The flag package has already printed its own
-	// usage for a help request, so that one is not repeated.
-	if wantsJSON(os.Args[1:]) {
+	// the human line to stderr. A help request is not a failure: the flag
+	// package has already printed the usage, so neither the JSON error object
+	// nor the stderr line is added for it.
+	if wantsJSON(os.Args[1:]) && !errors.Is(err, flag.ErrHelp) {
 		_ = printJSON(errorObject(err))
 	}
 	if !errors.Is(err, flag.ErrHelp) {
@@ -85,9 +86,25 @@ func run(args []string) error {
 		usage()
 		return nil
 	default:
+		// The common wrong guess is an issue subcommand at the top level
+		// (`trackd show TSK-1`, `trackd list`); point at the real command
+		// instead of dumping the whole usage screen.
+		if nested := issueSubcommandGuess(cmd); nested != "" {
+			return usagef("unknown command %q; did you mean %q?", cmd, nested)
+		}
 		usage()
 		return usagef("unknown command %q", cmd)
 	}
+}
+
+// issueSubcommandGuess maps a bare verb that is really an issue subcommand to
+// the command the caller meant, or "" when it is not one of them.
+func issueSubcommandGuess(cmd string) string {
+	switch cmd {
+	case "list", "show", "get", "view", "create", "update", "append", "relate":
+		return "trackd issue " + cmd
+	}
+	return ""
 }
 
 func defaultDB() string {
@@ -430,7 +447,7 @@ Server commands (operate on the database file directly):
 
 Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_TOKEN):
   issue     list | show | create | update | append | comment | relate | events
-  comment   edit
+  comment   list | edit  (to add a comment: trackd issue comment <key>)
   events    the global activity feed
   project   list | show | create | update
   milestone list | create | update

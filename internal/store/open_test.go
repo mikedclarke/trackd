@@ -116,6 +116,31 @@ func TestOpenReadOnly(t *testing.T) {
 }
 
 // S3: an older binary must refuse a database a newer one has migrated.
+// SchemaVersion is derived from the embedded migrations and is what a freshly
+// migrated database ends at, so /healthz can report it without a hand-kept
+// constant drifting from the real count.
+func TestSchemaVersionMatchesFreshDatabase(t *testing.T) {
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if SchemaVersion() != len(migs) {
+		t.Errorf("SchemaVersion() = %d, want %d (the migration count)", SchemaVersion(), len(migs))
+	}
+	s, err := Open(filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion() {
+		t.Errorf("fresh database at user_version %d, SchemaVersion() = %d", version, SchemaVersion())
+	}
+}
+
 func TestOpenRefusesNewerSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "future.db")
 	s, err := Open(path)

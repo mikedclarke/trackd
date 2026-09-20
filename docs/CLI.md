@@ -5,13 +5,21 @@ The client commands talk HTTP to a running server; the server commands operate o
 ## Client commands
 
 `issue list|show|get|view|create|update|append|comment|relate|events`,
-`comment edit`, `events`, `project list|show|create|update`,
+`comment list|edit`, `events`, `project list|show|create|update`,
 `milestone list|create|update`, `label list|add`, `statuses`, `health` (a table
 of status, version, schema, backup age and integrity, or the raw report with
-`--json`). Connection via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`.
+`--json`). Connection via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`, or
+a token file named by `$TRACKD_TOKEN_FILE` (tried after `$TRACKD_TOKEN`).
 Every command takes `--json` for machine-readable output, on failure too: the
-error object goes to stdout and the human line to stderr. Flags may come before
-or after the positional key, so `trackd issue show --json TSK-1` works.
+error object goes to stdout and the human line to stderr. Every list command's
+`--json` is an envelope keyed by the type (`{"projects": [...]}`,
+`{"issues": [...]}`, ...), the same shape the REST API returns. Flags may come
+before or after the positional key, so `trackd issue show --json TSK-1` works.
+`trackd <command> --help` (and `-h`) prints the flags and exits 0.
+
+`trackd comment <key> --body <text>` adds a comment, an alias for
+`trackd issue comment`, and `trackd comment list <key>` lists an issue's
+comments with their ids.
 
 `get` and `view` are aliases for `issue show`, and `statuses list` is accepted
 as a synonym for `statuses`. `issue list` takes `--search` as an alias for `-q`,
@@ -85,6 +93,7 @@ trackd setting set issue_prefix ACME        # new keys become ACME-1, ACME-2, ..
 trackd setting set label_groups '[["ready","blocked"]]'
 trackd setting set base_url https://trackd.example.com
 trackd setting set agent_label source:agent  # auto-tag issues created by non-admin tokens; empty disables
+trackd setting set workspace_name "Acme Tasks"  # name shown in the web board header; empty shows just the wordmark
 ```
 
 Every `set` records a `setting.updated` event with the old and new value (`trackd events --entity setting`). `set` writes to the database file, so it refuses while a server is running on it. `list` and `get` open the file read-only and are safe at any time.

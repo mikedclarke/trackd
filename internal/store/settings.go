@@ -25,6 +25,7 @@ var SettingSpecs = []SettingSpec{
 	{Key: "label_groups", Description: `JSON array of label groups, e.g. [["ready","blocked"]]; an issue holds at most one label from each group`},
 	{Key: "base_url", Description: "public URL of the server, used to fill each issue's url field; empty leaves it out"},
 	{Key: "agent_label", Description: "label auto-applied to issues created by non-admin tokens; empty disables it"},
+	{Key: "workspace_name", Description: "name shown in the web board header; empty (or \"trackd\") shows just the wordmark"},
 }
 
 // SettingValue is one row of `trackd setting list`.
@@ -92,6 +93,18 @@ func ValidateSetting(key, value string) error {
 		// has to be a name a label can carry; validTitle is that same rule.
 		if _, err := validTitle("agent_label", value); err != nil {
 			return err
+		}
+	case "workspace_name":
+		// Empty is allowed and means "show just the wordmark". It renders in the
+		// board header, so it is one line and bounded.
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("workspace_name must be a single line")
+		}
+		if len(value) > 100 {
+			return fmt.Errorf("workspace_name must be 100 bytes or fewer, got %d", len(value))
 		}
 	}
 	return nil

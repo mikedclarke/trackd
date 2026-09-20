@@ -1,12 +1,14 @@
 # trackd
 
 Self-hosted task tracker for AI agents. Single Go binary: SQLite storage, REST API,
-CLI, MCP endpoint, embedded read-only web UI.
+CLI, MCP endpoint, embedded web UI (reads everything; the one write it offers is
+posting a comment).
 
 ## Commands
 
-- Build: `make build` (stamps the version, refuses a dirty tree unless
-  `ALLOW_DIRTY=1`); `go build ./...` for a quick compile check
+- Build: `make build` (compiles to `bin/trackd`); `go build ./...` for a quick
+  compile check. The version is a hand-bumped `const` in `main.go`; `make dist`
+  builds the release archives and refuses a dirty tree unless `ALLOW_DIRTY=1`
 - Test: `make test` (`go test -race ./...`)
 - Lint: `make lint` (gofmt check, `go vet ./...`, golangci-lint when installed)
 - Format: `gofmt -w .`

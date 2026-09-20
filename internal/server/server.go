@@ -32,10 +32,9 @@ const (
 )
 
 // schemaVersion is the store's migration count, reported by /healthz so a
-// client can tell which contract it is talking to. The store does not expose
-// the number; bump this when a migration is added (latest is
-// internal/store/migrations/0004_ui_sessions.sql).
-const schemaVersion = 4
+// client can tell which contract it is talking to. It is derived from the
+// embedded migrations, so adding one bumps it with no hand edit here.
+var schemaVersion = store.SchemaVersion()
 
 // healthCheckEvery is how often the background checker runs PRAGMA
 // quick_check. Cheap on a database this size, and rare enough that a wedged
@@ -102,6 +101,11 @@ func (s *Server) Handler() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// Browsers ask for /favicon.ico on every board visit; answer once with No
+	// Content so it does not fill the request log with 404s.
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.Handle("/api/", s.auth(api))
 	mux.Handle("/mcp", s.auth(s.mcpHandler()))
 	mux.HandleFunc("GET /{$}", s.uiAuth(s.uiBoard))

@@ -31,6 +31,10 @@ func TestValidateSetting(t *testing.T) {
 		{"agent_label", "   ", true},
 		{"agent_label", "triage-bot", true},
 		{"agent_label", strings.Repeat("x", 501), false},
+		{"workspace_name", "", true},
+		{"workspace_name", "Acme Tasks", true},
+		{"workspace_name", "line one\nline two", false},
+		{"workspace_name", strings.Repeat("x", 101), false},
 		{"issue_seq", "5", false},
 		{"nope", "x", false},
 	}

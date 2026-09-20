@@ -209,6 +209,18 @@ func (s *Store) checkSchemaVersion(migrations int) error {
 	return nil
 }
 
+// SchemaVersion is the number of migrations this binary carries, which is the
+// user_version a freshly migrated database ends at. /healthz reports it so a
+// client can tell which schema contract it is talking to; deriving it from the
+// embedded migrations means adding one never needs a matching hand edit.
+func SchemaVersion() int {
+	migs, err := loadMigrations()
+	if err != nil {
+		return 0
+	}
+	return len(migs)
+}
+
 func loadMigrations() ([]migration, error) {
 	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {

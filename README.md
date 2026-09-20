@@ -155,12 +155,14 @@ affair on a phone.
   except one: replacing or clearing a description, which needs `admin`. Give the
   agents `agent` tokens and keep an `admin` token for yourself.
 - **Settings** live in the database and are read and written with
-  `trackd setting list|get|set`. There are four: `issue_prefix` (the key
+  `trackd setting list|get|set`. Five are writable: `issue_prefix` (the key
   prefix for new issues, `TSK` by default; existing keys keep theirs),
   `label_groups` (the exclusive groups above), `base_url` (the server's
-  public URL, used to fill each issue's `url` field for links in agent output)
-  and `agent_label` (a label auto-applied to issues created by non-admin tokens;
-  empty by default, which disables it).
+  public URL, used to fill each issue's `url` field for links in agent output),
+  `agent_label` (a label auto-applied to issues created by non-admin tokens;
+  empty by default, which disables it) and `workspace_name` (the name shown in
+  the web board header; empty shows just the wordmark). A sixth, `issue_seq`
+  (the last issue number handed out), is read-only.
   Every change is audited. `set` writes to the database file directly, so it
   refuses while a server is running: stop the server, set, start it again.
 
@@ -194,8 +196,9 @@ Streamable HTTP at `/mcp`, same bearer auth, twelve tools (`list_issues`, `get_i
 
 Server-rendered, zero JavaScript, embedded in the binary. A board grouped by
 status with project/label/assignee filters, and an issue page with description,
-comments, relations, and the audit trail. Sign in once with any API token.
-Read-only: agents do the writing.
+comments, relations, and the audit trail. Sign in once with any API token. The
+one write the board offers is posting a comment from the issue page, attributed
+to the signed-in token; every other write goes through the API, CLI, and MCP.
 
 ![an issue page](docs/issue.jpeg)
 
@@ -299,17 +302,20 @@ blocked backup directory and reports it in `/healthz` instead of hanging.
 ## Development
 
 ```sh
-make build          # stamps the version from git describe, refuses a dirty tree
+make build          # compiles to bin/trackd
 make test           # go test -race ./...
 make lint           # gofmt, go vet, and golangci-lint when it is installed
 make install        # builds, then moves the binary to ~/.local/bin/trackd
+make dist           # cross-compiled release archives and checksums in dist/
 ```
 
-`make build` will not build from a tree with uncommitted changes unless you pass
-`ALLOW_DIRTY=1`, so a binary's `trackd version` string always names a commit you
-can go back to. `make install` moves a freshly built binary into place rather
-than copying over the old one, which would corrupt a trackd already running from
-that path.
+The version is a single `const` in `main.go`, bumped by hand at release time, so
+`trackd version` is always a clean SemVer rather than a commit-dirtied string.
+`make dist` refuses to build a release from a tree with uncommitted changes
+unless you pass `ALLOW_DIRTY=1`, so a published archive always traces back to a
+commit. `make install` moves a freshly built binary into place rather than
+copying over the old one, which would corrupt a trackd already running from that
+path.
 
 Pure Go, no CGO (`modernc.org/sqlite`), two direct dependencies (the SQLite
 driver and the official MCP SDK). Needs Go 1.26 or newer to build.

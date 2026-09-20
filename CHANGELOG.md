@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-20
+
 ### Added
 
 - Web board logins are durable: sessions persist in the database (hashed, like
@@ -17,11 +19,42 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   audited exactly like an API comment. A "use as reply" button on each comment
   copies its body into the reply box, so reply-with-this-text flows (reviews,
   approvals) work from a phone. Cross-origin form posts are refused.
+- `trackd comment <key> --body <text>` now adds a comment, as an alias for
+  `trackd issue comment`, so the natural guess works instead of erroring.
+- `trackd comment list <key>` lists an issue's comments with their ids, so a
+  caller editing or replying to one reads the id off the list instead of
+  guessing it.
+- A token can be read from a file named by `$TRACKD_TOKEN_FILE`, keeping the
+  credential out of the environment and the process table. The order is
+  `--token`, then `$TRACKD_TOKEN`, then the file.
+- `workspace_name` is a writable setting (`trackd setting set workspace_name`).
+  It sets the name shown in the web board header and was previously only
+  reachable by editing the database directly.
 
 ### Changed
 
 - The web board is no longer described as read-only; commenting is the one
   write it offers. All other writes stay with the API, CLI, and MCP.
+- CLI `--json` list output is now enveloped everywhere, matching the REST API:
+  `project list`, `label list`, `milestone list`, `statuses`, `issue events`
+  and `issue relate` return `{"projects": [...]}`, `{"labels": [...]}` and so
+  on rather than a bare array. This is a breaking change for scripts that
+  parsed the bare array from those commands.
+- `trackd <verb>` where `<verb>` is really an issue subcommand (`show`, `list`,
+  `create`, ...) now answers with a `did you mean "trackd issue <verb>"?` hint
+  instead of dumping the whole usage screen.
+- `trackd issue update` help marks `--replace-description` and
+  `--clear-description` as admin-token only, and a 403 refusal now points at
+  `trackd issue append` as the path an agent token can take.
+
+### Fixed
+
+- `trackd <command> --help` (and `-h`) exits 0 instead of 2, so a harness or
+  script does not read a help request as an error.
+- `/healthz` reports the schema version derived from the embedded migrations
+  rather than a hand-maintained constant that could drift.
+- The server answers `/favicon.ico` with 204 No Content, so a browser board
+  visit no longer logs a 404 for it.
 
 ## [0.2.0] - 2026-09-13
 
