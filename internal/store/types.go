@@ -134,6 +134,8 @@ type IssueFilter struct {
 	Assignee       string
 	Milestone      string
 	Query          string
+	Priorities     []int // any match; 0 is "no priority"
+	CreatedBy      string
 	UpdatedSince   string
 	CompletedSince string
 	Archived       string // "", "true" (include), "only"
@@ -199,5 +201,70 @@ type ProjectPatch struct {
 	RemoveLabels []string
 	StartDate    *string
 	TargetDate   *string
+	Archived     *bool
+}
+
+// View is a saved issue filter with a name, so a queue can be opened by name
+// from the board, the API, the CLI or MCP. A shared view is visible to every
+// token; a private one only to its owner and to admins.
+type View struct {
+	ID           int64         `json:"id"`
+	Name         string        `json:"name"`
+	Description  string        `json:"description,omitempty"`
+	Filter       ViewFilter    `json:"filter"`
+	QuickActions []QuickAction `json:"quick_actions"`
+	Owner        string        `json:"owner"`
+	Shared       bool          `json:"shared"`
+	CreatedAt    string        `json:"created_at"`
+	UpdatedAt    string        `json:"updated_at"`
+	ArchivedAt   string        `json:"archived_at,omitempty"`
+}
+
+// ViewFilter is the stored half of an IssueFilter: the fields that make sense
+// to keep. Paging and the archived switch are per request, and a saved
+// updated_since would go stale, so a view keeps a relative window instead
+// (updated_within, e.g. 7d or 48h) and resolves it when it is applied.
+type ViewFilter struct {
+	Statuses      []string `json:"statuses,omitempty"`
+	StatusTypes   []string `json:"status_types,omitempty"`
+	Project       string   `json:"project,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	ExcludeLabels []string `json:"exclude_labels,omitempty"`
+	Assignee      string   `json:"assignee,omitempty"`
+	Milestone     string   `json:"milestone,omitempty"`
+	Priorities    []int    `json:"priorities,omitempty"`
+	UpdatedWithin string   `json:"updated_within,omitempty"`
+	CreatedBy     string   `json:"created_by,omitempty"`
+	Query         string   `json:"query,omitempty"`
+	OrderBy       string   `json:"order_by,omitempty"`
+}
+
+// QuickAction is a one-click patch a view offers on each of its rows: a name
+// on the button and the fields it changes. It goes through UpdateIssue like
+// any other write, so it carries the same audit event and version check.
+type QuickAction struct {
+	Name         string   `json:"name"`
+	Status       string   `json:"status,omitempty"`
+	Priority     *int     `json:"priority,omitempty"`
+	AddLabels    []string `json:"add_labels,omitempty"`
+	RemoveLabels []string `json:"remove_labels,omitempty"`
+}
+
+type ViewInput struct {
+	Name         string
+	Description  string
+	Filter       ViewFilter
+	QuickActions []QuickAction
+	Shared       *bool // nil means shared
+}
+
+// ViewPatch changes only the fields it carries. Filter and QuickActions are
+// replaced whole: a view is small enough to read, amend and write back.
+type ViewPatch struct {
+	Name         *string
+	Description  *string
+	Filter       *ViewFilter
+	QuickActions *[]QuickAction
+	Shared       *bool
 	Archived     *bool
 }

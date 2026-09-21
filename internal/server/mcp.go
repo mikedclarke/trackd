@@ -89,6 +89,9 @@ type mcpListIssuesIn struct {
 	Assignee       string   `json:"assignee,omitempty" jsonschema:"assignee name"`
 	Milestone      string   `json:"milestone,omitempty" jsonschema:"milestone name"`
 	Query          string   `json:"query,omitempty" jsonschema:"substring search over key, title, description and comment bodies"`
+	Priorities     []int    `json:"priorities,omitempty" jsonschema:"priorities to include, 0-4; any match"`
+	CreatedBy      string   `json:"created_by,omitempty" jsonschema:"only issues created by this actor"`
+	View           string   `json:"view,omitempty" jsonschema:"name of a saved view whose filter applies underneath; any field given here narrows or re-sorts it"`
 	UpdatedSince   string   `json:"updated_since,omitempty" jsonschema:"only issues updated at or after this RFC3339 timestamp"`
 	CompletedSince string   `json:"completed_since,omitempty" jsonschema:"only issues completed at or after this RFC3339 timestamp"`
 	Archived       string   `json:"archived,omitempty" jsonschema:"archived issues: empty excludes them, true includes them, only returns just them"`
@@ -208,10 +211,30 @@ type mcpRelationsOut struct {
 	Removed *bool `json:"removed,omitempty"`
 }
 
+type mcpListViewsIn struct {
+	IncludeArchived bool `json:"include_archived,omitempty" jsonschema:"include archived views"`
+}
+
+type mcpViewsOut struct {
+	Views []store.View `json:"views"`
+}
+
+type mcpSaveViewIn struct {
+	Mode         string               `json:"mode" jsonschema:"create a new view or update an existing one; both need name"`
+	Name         string               `json:"name" jsonschema:"view name, unique among live views, case-insensitively"`
+	Rename       *string              `json:"rename,omitempty" jsonschema:"on update, the new name"`
+	Description  *string              `json:"description,omitempty" jsonschema:"what the view is for"`
+	Filter       *store.ViewFilter    `json:"filter,omitempty" jsonschema:"the issue filter: statuses, status_types, project, labels, exclude_labels, assignee, milestone, priorities, updated_within (7d, 48h), created_by, query, order_by; required on create, replaced whole on update"`
+	QuickActions *[]store.QuickAction `json:"quick_actions,omitempty" jsonschema:"one-click patches offered on every row of the view, each a name plus status, priority, add_labels or remove_labels; up to 4, replaced whole on update"`
+	Shared       *bool                `json:"shared,omitempty" jsonschema:"visible to every token (the default) or only to the owner and admins"`
+	Archived     *bool                `json:"archived,omitempty" jsonschema:"on update, archive the view (frees its name) or restore it"`
+	Actor        string               `json:"actor,omitempty" jsonschema:"actor recorded on the audit trail; defaults to the API token's name"`
+}
+
 type mcpListActivityIn struct {
 	Since   string `json:"since,omitempty" jsonschema:"only events at or after this RFC3339 timestamp"`
 	AfterID int64  `json:"after_id,omitempty" jsonschema:"only events with an id above this, the cursor for paging forward"`
-	Entity  string `json:"entity,omitempty" jsonschema:"restrict to one entity kind: issue, project, milestone or token"`
+	Entity  string `json:"entity,omitempty" jsonschema:"restrict to one entity kind: issue, project, milestone, token, setting or view"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"maximum events, default 100, capped at 1000"`
 }
 
@@ -269,9 +292,9 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_issues",
 		Annotations: readOnlyTool(),
-		Description: "List issues filtered by any combination of status names, status types (triage, backlog, unstarted, started, completed, canceled), project, labels, parent, assignee, milestone, text query and timestamps, ordered by updated, created or priority.",
+		Description: "List issues filtered by any combination of status names, status types (triage, backlog, unstarted, started, completed, canceled), project, labels, parent, assignee, milestone, priorities, creator, text query and timestamps, ordered by updated, created or priority; or pass view to start from a saved view's filter.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListIssuesIn) (*mcp.CallToolResult, mcpIssuesOut, error) {
-		issues, err := s.store.ListIssues(store.IssueFilter{
+		filter, err := s.applyView(in.View, tokenActor, role, store.IssueFilter{
 			Statuses:       in.Statuses,
 			StatusTypes:    in.StatusTypes,
 			Project:        in.Project,
@@ -281,6 +304,8 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 			Assignee:       in.Assignee,
 			Milestone:      in.Milestone,
 			Query:          in.Query,
+			Priorities:     in.Priorities,
+			CreatedBy:      in.CreatedBy,
 			UpdatedSince:   in.UpdatedSince,
 			CompletedSince: in.CompletedSince,
 			Archived:       in.Archived,
@@ -288,6 +313,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 			Limit:          in.Limit,
 			Offset:         in.Offset,
 		})
+		if err != nil {
+			return nil, mcpIssuesOut{}, mcpError(err)
+		}
+		issues, err := s.store.ListIssues(filter)
 		if err != nil {
 			return nil, mcpIssuesOut{}, mcpError(err)
 		}
@@ -591,9 +620,72 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_views",
+		Annotations: readOnlyTool(),
+		Description: "List the saved views this token may open: every shared view plus its own private ones. Pass a view's name to list_issues to apply it.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListViewsIn) (*mcp.CallToolResult, mcpViewsOut, error) {
+		views, err := s.store.ListViews(tokenActor, role == roleAdmin, in.IncludeArchived)
+		if err != nil {
+			return nil, mcpViewsOut{}, mcpError(err)
+		}
+		return nil, mcpViewsOut{Views: views}, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "save_view",
+		Annotations: writeTool(true),
+		Description: "Create a saved view with mode create (name and filter required) or change one with mode update (name required; filter and quick_actions are replaced whole; only the owner or an admin may change a view). A view is a named issue filter anyone can open by name, with optional quick actions offered on each of its rows in the web board.",
+		InputSchema: enumSchema[mcpSaveViewIn](map[string][]any{"mode": {"create", "update"}}),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveViewIn) (*mcp.CallToolResult, store.View, error) {
+		act := resolve(in.Actor)
+		switch in.Mode {
+		case "create":
+			if in.Filter == nil {
+				return nil, store.View{}, mcpError(fmt.Errorf("mode create needs a filter: %w", store.ErrInvalidRef))
+			}
+			view, err := s.store.CreateView(store.ViewInput{
+				Name:         in.Name,
+				Description:  strOr(in.Description),
+				Filter:       *in.Filter,
+				QuickActions: sliceOrQuick(in.QuickActions),
+				Shared:       in.Shared,
+			}, act)
+			if err != nil {
+				return nil, store.View{}, mcpError(err)
+			}
+			return nil, *view, nil
+		case "update":
+			view, err := s.visibleView(in.Name, tokenActor, role)
+			if err != nil {
+				return nil, store.View{}, mcpError(err)
+			}
+			if !canEditView(view, tokenActor, role) {
+				return nil, store.View{}, mcpError(errViewOwner)
+			}
+			if in.Rename == nil && in.Description == nil && in.Filter == nil && in.QuickActions == nil && in.Shared == nil && in.Archived == nil {
+				return nil, store.View{}, mcpError(errors.New("nothing to update: pass at least one field"))
+			}
+			updated, err := s.store.UpdateView(view.Name, store.ViewPatch{
+				Name:         in.Rename,
+				Description:  in.Description,
+				Filter:       in.Filter,
+				QuickActions: in.QuickActions,
+				Shared:       in.Shared,
+				Archived:     in.Archived,
+			}, act)
+			if err != nil {
+				return nil, store.View{}, mcpError(err)
+			}
+			return nil, *updated, nil
+		default:
+			return nil, store.View{}, mcpError(fmt.Errorf("mode must be create or update, got %q", in.Mode))
+		}
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_activity",
 		Annotations: readOnlyTool(),
-		Description: "Read the audit feed oldest first, filtered by timestamp, entity kind (issue, project, milestone, token) or an after_id cursor, so a caller can page forward without missing an event.",
+		Description: "Read the audit feed oldest first, filtered by timestamp, entity kind (issue, project, milestone, token, setting, view) or an after_id cursor, so a caller can page forward without missing an event.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListActivityIn) (*mcp.CallToolResult, mcpActivityOut, error) {
 		events, err := s.store.ListAllEvents(store.EventFilter{
 			Since:   in.Since,
@@ -646,6 +738,13 @@ func strOr(p *string) string {
 func intOr(p *int) int {
 	if p == nil {
 		return 0
+	}
+	return *p
+}
+
+func sliceOrQuick(p *[]store.QuickAction) []store.QuickAction {
+	if p == nil {
+		return nil
 	}
 	return *p
 }

@@ -1,0 +1,77 @@
+{{define "content"}}
+{{template "tabs" .}}
+{{$f := .Form}}
+<form class="view-form" method="post" action="{{if $f.Editing}}/ui/view/{{$f.Original}}{{else}}/ui/views{{end}}">
+  <h1>{{if $f.Editing}}edit view{{else}}new view{{end}}</h1>
+  {{if $f.Error}}<p class="notice notice-error">{{$f.Error}}</p>{{end}}
+
+  <div class="fields">
+    <label>name <input type="text" name="name" value="{{$f.Name}}" required maxlength="60"></label>
+    <label>description <input type="text" name="description" value="{{$f.Description}}"></label>
+    <label class="check"><input type="checkbox" name="shared" value="1" {{if $f.Shared}}checked{{end}}> shared with everyone (unticked: only you and admins)</label>
+  </div>
+
+  <h2>filter</h2>
+  <p class="dim">An issue is shown when it matches every field you set; a field left empty does not filter. Statuses, priorities and labels match any of the ticked ones, except labels the issue must carry, which it must carry all of.</p>
+  <div class="fields">
+    <fieldset><legend>status</legend>
+      {{range $f.Statuses}}<label class="check"><input type="checkbox" name="status" value="{{.Name}}" {{if has $f.Filter.Statuses .Name}}checked{{end}}> {{.Name}}</label>{{end}}
+    </fieldset>
+    <fieldset><legend>status type</legend>
+      {{range $f.StatusTypes}}<label class="check"><input type="checkbox" name="status_type" value="{{.}}" {{if has $f.Filter.StatusTypes .}}checked{{end}}> {{.}}</label>{{end}}
+    </fieldset>
+    <fieldset><legend>priority</legend>
+      {{range $p, $w := prioWords}}<label class="check"><input type="checkbox" name="priority" value="{{$p}}" {{if hasInt $f.Filter.Priorities $p}}checked{{end}}> {{$w}}</label>{{end}}
+    </fieldset>
+    <label>project
+      <select name="project"><option value="">any</option>{{range $f.Projects}}<option value="{{.Slug}}" {{if eq .Slug $f.Filter.Project}}selected{{end}}>{{.Slug}}</option>{{end}}</select>
+    </label>
+    <label>labels the issue must carry
+      <select name="label" multiple size="5">{{range $f.Labels}}<option value="{{.Name}}" {{if has $f.Filter.Labels .Name}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+    </label>
+    <label>labels that exclude it
+      <select name="exclude_label" multiple size="5">{{range $f.Labels}}<option value="{{.Name}}" {{if has $f.Filter.ExcludeLabels .Name}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+    </label>
+    <label>assignee <input type="text" name="assignee" value="{{$f.Filter.Assignee}}" list="assignees"></label>
+    <datalist id="assignees">{{range $f.Assignees}}<option value="{{.}}">{{end}}</datalist>
+    <label>milestone <input type="text" name="milestone" value="{{$f.Filter.Milestone}}"></label>
+    <label>updated within <input type="text" name="updated_within" value="{{$f.Filter.UpdatedWithin}}" placeholder="7d, 48h, 2w"></label>
+    <label>created by <input type="text" name="created_by" value="{{$f.Filter.CreatedBy}}" placeholder="token name"></label>
+    <label>text search <input type="text" name="query" value="{{$f.Filter.Query}}"></label>
+    <label>order
+      <select name="order_by"><option value="">updated, newest first</option>{{range $f.OrderOptions}}<option value="{{.}}" {{if eq . $f.Filter.OrderBy}}selected{{end}}>{{.}}</option>{{end}}</select>
+    </label>
+  </div>
+
+  <h2>quick actions</h2>
+  <p class="dim">Buttons shown on every row of the view. Each applies its changes in one tap, together with any reply typed in the box. Leave a row's name empty to leave it out.</p>
+  {{range $i, $q := $f.Quick}}
+  <div class="fields quick-row">
+    <label>name <input type="text" name="quick_name_{{$i}}" value="{{$q.Name}}"></label>
+    <label>status
+      <select name="quick_status_{{$i}}"><option value="">keep</option>{{range $f.Statuses}}<option value="{{.Name}}" {{if eq .Name $q.Status}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+    </label>
+    <label>priority
+      <select name="quick_priority_{{$i}}"><option value="">keep</option>{{range $p, $w := prioWords}}<option value="{{$p}}" {{if and $q.Priority (eq (deref $q.Priority) $p)}}selected{{end}}>{{$w}}</option>{{end}}</select>
+    </label>
+    <label>add labels
+      <select name="quick_add_{{$i}}" multiple size="3">{{range $f.Labels}}<option value="{{.Name}}" {{if has $q.AddLabels .Name}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+    </label>
+    <label>remove labels
+      <select name="quick_remove_{{$i}}" multiple size="3">{{range $f.Labels}}<option value="{{.Name}}" {{if has $q.RemoveLabels .Name}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+    </label>
+  </div>
+  {{end}}
+
+  <div class="form-foot">
+    <button type="submit" name="do" value="save">{{if $f.Editing}}Save view{{else}}Create view{{end}}</button>
+    {{if $f.Editing}}<a class="button-link" href="/ui/view/{{$f.Original}}">cancel</a>{{else}}<a class="button-link" href="/">cancel</a>{{end}}
+  </div>
+</form>
+{{if $f.Editing}}
+<form class="archive-form" method="post" action="/ui/view/{{$f.Original}}">
+  <button type="submit" name="do" value="archive" class="danger">Archive this view</button>
+  <span class="dim">Archiving hides it and frees its name; <code>trackd view restore</code> brings it back.</span>
+</form>
+{{end}}
+{{end}}

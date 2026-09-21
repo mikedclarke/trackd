@@ -1,5 +1,6 @@
 {{define "content"}}
 <p class="crumbs"><a href="/">← board</a></p>
+{{with .Notice}}<p class="notice notice-{{.Kind}}">{{.Text}}</p>{{end}}
 
 <article class="issue">
   <div class="issue-head type-{{.Issue.StatusType}}">
@@ -23,6 +24,28 @@
   </dl>
 
   {{if .Issue.Description}}<div class="description">{{.Issue.Description}}</div>{{end}}
+
+  {{if not .Issue.ArchivedAt}}
+  <form class="action-form" method="post" action="/ui/issue/{{.Issue.Key}}/action">
+    <input type="hidden" name="back" value="/ui/issue/{{.Issue.Key}}">
+    <input type="hidden" name="expected_version" value="{{.Issue.Version}}">
+    <div class="fields">
+      <label>status
+        <select name="status"><option value="">keep</option>{{$status := .Issue.Status}}{{range .Statuses}}<option value="{{.Name}}">{{.Name}}{{if eq .Name $status}} (current){{end}}</option>{{end}}</select>
+      </label>
+      <label>priority
+        <select name="priority"><option value="">keep</option><option value="0">none</option><option value="1">P1 urgent</option><option value="2">P2 high</option><option value="3">P3 medium</option><option value="4">P4 low</option></select>
+      </label>
+      <label>add label
+        <select name="add_label"><option value="">none</option>{{range .Labels}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select>
+      </label>
+      <label>remove label
+        <select name="remove_label"><option value="">none</option>{{range .Issue.Labels}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+      </label>
+      <button type="submit" name="do" value="apply">Apply</button>
+    </div>
+  </form>
+  {{end}}
 
   {{if .Relations}}
   <h2>relations</h2>

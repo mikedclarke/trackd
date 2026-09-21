@@ -20,3 +20,11 @@
 </main>
 </body>
 </html>
+{{define "tabs"}}
+<nav class="tabs">
+  <a class="tab{{if not .Current}} active{{end}}" href="/">board</a>
+  {{$current := .Current}}
+  {{range .Views}}<a class="tab{{if eq .Name $current}} active{{end}}{{if not .Shared}} private{{end}}" href="/ui/view/{{.Name}}" {{if .Description}}title="{{.Description}}"{{end}}>{{.Name}}</a>{{end}}
+  <a class="tab new" href="/ui/views/new" title="save a filter as a view">+ view</a>
+</nav>
+{{end}}

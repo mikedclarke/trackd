@@ -7,6 +7,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-21
+
+### Added
+
+- Saved views: a named issue filter stored server-side, so a queue can be
+  opened by name from every interface. Migration `0005_views.sql` (schema 5);
+  `GET/POST /api/v1/views` and `GET/PATCH /api/v1/views/{name}`;
+  `trackd view list|show|create|update|delete|restore`;
+  `trackd issue list --view NAME` and `?view=NAME` on the issue list, whose
+  explicit filters layer on top of the view's; MCP `list_views` and
+  `save_view`, and `view` on `list_issues`. A view filters on statuses, status
+  types, project, labels, excluded labels, assignee, milestone, priorities, a
+  relative `updated_within` window (`7d`, `48h`), creator, text and order. It
+  is shared by default or private to its owner and admins; only the owner or
+  an admin may change it; deleting archives it and frees the name. Views ride
+  in the JSONL dump and are audited (`view.created|updated|archived|restored`,
+  `trackd events --entity view`).
+- Quick actions on a view: up to four named one-tap patches (status, priority,
+  add or remove labels) shown as buttons on every row of the view in the web
+  board (`--quick "Answered: remove=waiting"`).
+- The web board works a queue. Every saved view is a tab and a plain URL
+  (`/ui/view/<name>`); each row opens inline to the latest comment, a reply
+  box, the quick actions, and a status, priority and label form. The issue
+  page gains the same action form. Every write goes through the store like
+  the API, is attributed to the signed-in token, records the same audit event,
+  and carries the issue version the page was rendered with: a change that
+  lost a race is refused with a notice (the reply typed with it is still
+  saved). Views can be created, edited and archived from the board (`+ view`).
+- `issue list --priority` (repeatable, matches any) and `--created-by`, and
+  the matching `priority` and `created_by` list parameters on the API and
+  `priorities` and `created_by` on MCP `list_issues`.
+
+### Changed
+
+- The board and issue page lay out in one column on a phone: no sideways
+  scrolling, full-width controls, tabs that scroll.
+- `trackd view` is now the view command group, so it no longer hints at
+  `trackd issue view` (which still works as an alias of `issue show`).
+
 ## [0.3.0] - 2026-09-20
 
 ### Added

@@ -87,8 +87,21 @@ type issueListResponse struct {
 
 var issueListParams = []string{
 	"status", "status_type", "project", "label", "exclude_label", "parent",
-	"assignee", "milestone", "q", "updated_since", "completed_since",
-	"archived", "order_by", "limit", "offset",
+	"assignee", "milestone", "q", "priority", "created_by", "updated_since",
+	"completed_since", "archived", "order_by", "limit", "offset", "view",
+}
+
+// intListParam parses a repeatable whole-number parameter such as priority.
+func intListParam(q url.Values, name string) ([]int, error) {
+	var out []int
+	for _, raw := range q[name] {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("%s must be a non-negative integer, got %q", name, raw)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +130,12 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
-	issues, err := s.store.ListIssues(store.IssueFilter{
+	priorities, err := intListParam(q, "priority")
+	if err != nil {
+		writeValidation(w, err.Error())
+		return
+	}
+	filter, err := s.applyView(q.Get("view"), actor(r, ""), tokenRole(r), store.IssueFilter{
 		Statuses:       q["status"],
 		StatusTypes:    q["status_type"],
 		Project:        q.Get("project"),
@@ -127,6 +145,8 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		Assignee:       q.Get("assignee"),
 		Milestone:      q.Get("milestone"),
 		Query:          q.Get("q"),
+		Priorities:     priorities,
+		CreatedBy:      q.Get("created_by"),
 		UpdatedSince:   updatedSince,
 		CompletedSince: completedSince,
 		Archived:       q.Get("archived"),
@@ -134,6 +154,11 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		Limit:          limit,
 		Offset:         offset,
 	})
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	issues, err := s.store.ListIssues(filter)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return

@@ -1,0 +1,87 @@
+{{define "content"}}
+{{template "tabs" .}}
+{{with .Notice}}<p class="notice notice-{{.Kind}}">{{.Text}}</p>{{end}}
+
+<div class="view-head">
+  <div>
+    <h1>{{.View.Name}}</h1>
+    {{if .View.Description}}<p class="view-desc">{{.View.Description}}</p>{{end}}
+    <p class="view-filter">{{range $i, $part := .Filter}}{{if $i}} · {{end}}{{$part}}{{end}}{{if not .View.Shared}} · <span class="private">private</span>{{end}}</p>
+  </div>
+  <div class="view-tools">
+    <span class="filter-count">{{.Count}} issues{{if .Offset}} from {{.Offset}}{{end}}</span>
+    {{if .CanEdit}}<a class="button-link" href="/ui/view/{{.View.Name}}/edit">edit view</a>{{end}}
+  </div>
+</div>
+
+{{if .Rows}}
+<div class="rows">
+  {{range .Rows}}
+  {{$issue := .Issue}}
+  <details class="row type-{{$issue.StatusType}}" id="{{$issue.Key}}">
+    <summary class="row-summary">
+      <span class="row-line">
+        <span class="key">{{$issue.Key}}</span>
+        <span class="status"><span class="dot"></span>{{$issue.Status}}</span>
+        {{if eq $issue.Priority 1}}<span class="prio p1">P1</span>{{else if eq $issue.Priority 2}}<span class="prio p2">P2</span>{{else if eq $issue.Priority 3}}<span class="prio p3">P3</span>{{else if eq $issue.Priority 4}}<span class="prio p4">P4</span>{{end}}
+        <span class="when">{{shortTime $issue.UpdatedAt}}</span>
+      </span>
+      <span class="row-title">{{$issue.Title}}</span>
+      {{if or $issue.Project $issue.Labels $issue.Assignee}}
+      <span class="card-tags">
+        {{if $issue.Project}}<span class="tag project-tag">{{$issue.Project}}</span>{{end}}
+        {{if $issue.Assignee}}<span class="tag assignee-tag">{{$issue.Assignee}}</span>{{end}}
+        {{range $issue.Labels}}<span class="tag">{{.}}</span>{{end}}
+      </span>
+      {{end}}
+    </summary>
+    <div class="row-body">
+      {{with .Latest}}
+      <div class="comment latest">
+        <div class="comment-head"><span class="actor">{{if .Actor}}{{.Actor}}{{else}}unknown{{end}}</span> <span class="when">{{shortTime .CreatedAt}}</span> <span class="dim">latest comment</span></div>
+        <div class="comment-body">{{.Body}}</div>
+      </div>
+      {{else}}
+      <p class="dim">No comments yet.</p>
+      {{end}}
+      <p class="row-open"><a href="/ui/issue/{{$issue.Key}}">open {{$issue.Key}}</a></p>
+      <form class="row-form" method="post" action="/ui/issue/{{$issue.Key}}/action">
+        <input type="hidden" name="back" value="{{$.Back}}#{{$issue.Key}}">
+        <input type="hidden" name="view" value="{{$.View.Name}}">
+        <input type="hidden" name="expected_version" value="{{$issue.Version}}">
+        <textarea name="body" rows="3" placeholder="Reply as {{$.Actor}}…"></textarea>
+        <div class="row-actions">
+          <button type="submit" name="do" value="reply">Reply</button>
+          {{range .Actions}}<button type="submit" name="do" value="quick:{{.Index}}" class="quick">{{.Name}}</button>{{end}}
+        </div>
+        <details class="row-more">
+          <summary>change status, priority or labels</summary>
+          <div class="fields">
+            <label>status
+              <select name="status"><option value="">keep</option>{{range $.Statuses}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select>
+            </label>
+            <label>priority
+              <select name="priority"><option value="">keep</option><option value="0">none</option><option value="1">P1 urgent</option><option value="2">P2 high</option><option value="3">P3 medium</option><option value="4">P4 low</option></select>
+            </label>
+            <label>add label
+              <select name="add_label"><option value="">none</option>{{range $.Labels}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select>
+            </label>
+            <label>remove label
+              <select name="remove_label"><option value="">none</option>{{range $issue.Labels}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+            </label>
+            <button type="submit" name="do" value="apply">Apply</button>
+          </div>
+        </details>
+      </form>
+    </div>
+  </details>
+  {{end}}
+</div>
+<p class="paging">{{if .Prev}}<a href="{{.Prev}}">← previous</a>{{end}}{{if .Next}}<a href="{{.Next}}">next {{.Count}} →</a>{{end}}</p>
+{{else}}
+<div class="empty-board">
+  <p>Nothing matches this view{{if .Offset}} from here{{end}}.</p>
+  {{if .Prev}}<p><a href="{{.Prev}}">← previous</a></p>{{end}}
+</div>
+{{end}}
+{{end}}

@@ -13,6 +13,7 @@ import (
 // revocation.
 type UISession struct {
 	TokenName string
+	TokenRole string
 	ExpiresAt time.Time
 }
 
@@ -48,10 +49,10 @@ func (s *Store) UISession(id string) (*UISession, error) {
 	var out UISession
 	var expires string
 	err := s.db.QueryRow(
-		`SELECT t.name, us.expires_at FROM ui_sessions us
+		`SELECT t.name, t.role, us.expires_at FROM ui_sessions us
 		 JOIN tokens t ON t.id = us.token_id AND t.revoked_at IS NULL
 		 WHERE us.id = ? AND us.expires_at > ?`, hashToken(id), now(),
-	).Scan(&out.TokenName, &expires)
+	).Scan(&out.TokenName, &out.TokenRole, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -28,16 +28,26 @@ type IssueQuery struct {
 	Assignee       string
 	Milestone      string
 	Query          string
+	Priorities     []int
+	CreatedBy      string
 	UpdatedSince   string
 	CompletedSince string
 	Archived       string // "", "true" (include), "only"
 	OrderBy        string // "updated" (default), "created", "priority"
 	Limit          int
 	Offset         int
+	// View names a saved view whose filter sits under the explicit fields:
+	// anything left empty here takes the view's value.
+	View string
 }
 
 func (q IssueQuery) values() url.Values {
 	v := url.Values{}
+	for _, p := range q.Priorities {
+		v.Add("priority", strconv.Itoa(p))
+	}
+	setIf(v, "created_by", q.CreatedBy)
+	setIf(v, "view", q.View)
 	for _, s := range q.Statuses {
 		v.Add("status", s)
 	}
@@ -561,4 +571,101 @@ func (c *Client) Health() (map[string]any, int, error) {
 		return nil, status, err
 	}
 	return health, status, nil
+}
+
+// ListViews returns the views the token may see; archived includes the
+// archived ones.
+func (c *Client) ListViews(archived bool) ([]store.View, error) {
+	v := url.Values{}
+	if archived {
+		v.Set("archived", "true")
+	}
+	var env struct {
+		Views []store.View `json:"views"`
+	}
+	if err := c.Do("GET", "/api/v1/views", v, nil, &env); err != nil {
+		return nil, err
+	}
+	return env.Views, nil
+}
+
+func (c *Client) GetView(name string) (*store.View, error) {
+	var view store.View
+	if err := c.Do("GET", "/api/v1/views/"+url.PathEscape(name), nil, nil, &view); err != nil {
+		return nil, err
+	}
+	return &view, nil
+}
+
+// ViewCreate is the body of POST /api/v1/views.
+type ViewCreate struct {
+	Name         string
+	Description  string
+	Filter       store.ViewFilter
+	QuickActions []store.QuickAction
+	Shared       *bool
+	Actor        string
+}
+
+func (c *Client) CreateView(in ViewCreate) (*store.View, error) {
+	body := map[string]any{"name": in.Name, "filter": in.Filter}
+	if in.Description != "" {
+		body["description"] = in.Description
+	}
+	if len(in.QuickActions) > 0 {
+		body["quick_actions"] = in.QuickActions
+	}
+	if in.Shared != nil {
+		body["shared"] = *in.Shared
+	}
+	if in.Actor != "" {
+		body["actor"] = in.Actor
+	}
+	var view store.View
+	if err := c.Do("POST", "/api/v1/views", nil, body, &view); err != nil {
+		return nil, err
+	}
+	return &view, nil
+}
+
+// ViewPatch is the body of PATCH /api/v1/views/{name}. Filter and
+// QuickActions replace the stored ones whole.
+type ViewPatch struct {
+	Name         *string
+	Description  *string
+	Filter       *store.ViewFilter
+	QuickActions *[]store.QuickAction
+	Shared       *bool
+	Archived     *bool
+	Actor        string
+}
+
+func (c *Client) UpdateView(name string, p ViewPatch) (*store.View, error) {
+	body := map[string]any{}
+	if p.Name != nil {
+		body["name"] = *p.Name
+	}
+	if p.Description != nil {
+		body["description"] = *p.Description
+	}
+	if p.Filter != nil {
+		body["filter"] = *p.Filter
+	}
+	if p.QuickActions != nil {
+		body["quick_actions"] = *p.QuickActions
+	}
+	if p.Shared != nil {
+		body["shared"] = *p.Shared
+	}
+	if p.Archived != nil {
+		body["archived"] = *p.Archived
+	}
+	if p.Actor != "" {
+		body["actor"] = p.Actor
+	}
+	var view store.View
+	if err := c.Do("PATCH", "/api/v1/views/"+url.PathEscape(name), nil, body, &view); err != nil {
+		return nil, err
+	}
+	return &view, nil
 }

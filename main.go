@@ -18,7 +18,7 @@ import (
 	"github.com/mikedclarke/trackd/internal/store"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 func main() {
 	err := run(os.Args[1:])
@@ -60,6 +60,8 @@ func run(args []string) error {
 		return cmdProject(rest)
 	case "label":
 		return cmdLabel(rest)
+	case "view":
+		return cmdView(rest)
 	case "milestone":
 		return cmdMilestone(rest)
 	case "statuses":
@@ -101,7 +103,7 @@ func run(args []string) error {
 // the command the caller meant, or "" when it is not one of them.
 func issueSubcommandGuess(cmd string) string {
 	switch cmd {
-	case "list", "show", "get", "view", "create", "update", "append", "relate":
+	case "list", "show", "get", "create", "update", "append", "relate":
 		return "trackd issue " + cmd
 	}
 	return ""
@@ -452,6 +454,7 @@ Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_
   project   list | show | create | update
   milestone list | create | update
   label     list | add
+  view      list | show | create | update | delete | restore  (saved filters; open one with issue list --view)
   statuses  list workflow statuses
   health    show server health
 

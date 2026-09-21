@@ -11,7 +11,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mikedclarke/trackd/internal/store"
 )
+
+func strp(s string) *string { return &s }
 
 // The tests speak the REST contract by hand rather than running the real
 // server, so the client is tested against the contract it is written to and
@@ -537,4 +541,59 @@ func fmtAny(v any) string {
 	s := string(b)
 	s = strings.ReplaceAll(s, `"`, "")
 	return s
+}
+
+func TestViewCallsSpeakTheContract(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	var gotBody map[string]any
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		gotBody = nil
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		}
+		switch {
+		case r.URL.Path == "/api/v1/views" && r.Method == "GET":
+			writeJSON(t, w, 200, map[string]any{"views": []map[string]any{{"name": "court", "owner": "pm", "shared": true}}})
+		case r.URL.Path == "/api/v1/issues":
+			writeJSON(t, w, 200, map[string]any{"issues": []any{}, "next_offset": nil})
+		default:
+			writeJSON(t, w, 200, map[string]any{"name": "court", "owner": "pm", "shared": false, "filter": map[string]any{"labels": []string{"waiting"}}})
+		}
+	})
+	views, err := c.ListViews(true)
+	if err != nil || len(views) != 1 || views[0].Name != "court" || gotQuery != "archived=true" {
+		t.Fatalf("ListViews = %+v, %v (query %q)", views, err, gotQuery)
+	}
+	shared := false
+	view, err := c.CreateView(ViewCreate{
+		Name: "court", Filter: store.ViewFilter{Labels: []string{"waiting"}, UpdatedWithin: "7d"},
+		QuickActions: []store.QuickAction{{Name: "Answered", RemoveLabels: []string{"waiting"}}},
+		Shared:       &shared, Actor: "alex",
+	})
+	if err != nil || view.Name != "court" || gotMethod != "POST" || gotPath != "/api/v1/views" {
+		t.Fatalf("CreateView = %+v, %v (%s %s)", view, err, gotMethod, gotPath)
+	}
+	filter, _ := gotBody["filter"].(map[string]any)
+	quick, _ := gotBody["quick_actions"].([]any)
+	if filter["updated_within"] != "7d" || len(quick) != 1 || gotBody["shared"] != false || gotBody["actor"] != "alex" {
+		t.Errorf("create body = %v", gotBody)
+	}
+	if _, err := c.GetView("waiting on me"); err != nil || gotPath != "/api/v1/views/waiting on me" {
+		t.Errorf("GetView path = %q, %v", gotPath, err)
+	}
+	yes := true
+	if _, err := c.UpdateView("court", ViewPatch{Archived: &yes, Description: strp("x")}); err != nil || gotMethod != "PATCH" {
+		t.Errorf("UpdateView = %v (%s)", err, gotMethod)
+	}
+	if gotBody["archived"] != true || gotBody["description"] != "x" || len(gotBody) != 2 {
+		t.Errorf("patch body = %v", gotBody)
+	}
+	if _, _, err := c.ListIssues(IssueQuery{View: "court", Priorities: []int{1, 2}, CreatedBy: "alex"}); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := url.ParseQuery(gotQuery)
+	if q.Get("view") != "court" || q.Get("created_by") != "alex" || strings.Join(q["priority"], ",") != "1,2" {
+		t.Errorf("list query = %q", gotQuery)
+	}
 }

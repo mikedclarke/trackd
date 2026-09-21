@@ -11,7 +11,8 @@ Everything else: `GET /api/v1/events` (the global feed),
 `GET/POST /api/v1/projects`, `GET/PATCH /api/v1/projects/{slug}`,
 `GET/POST /api/v1/milestones`, `GET/PATCH /api/v1/milestones/{id}`,
 per-entity event feeds under projects and milestones,
-`GET/POST /api/v1/labels`, `GET /api/v1/statuses`.
+`GET/POST /api/v1/labels`, `GET /api/v1/statuses`,
+`GET/POST /api/v1/views`, `GET/PATCH /api/v1/views/{name}`.
 
 `POST /api/v1/labels` creates a label or recolors an existing one. `color` is
 optional and must be a hex color, `#rgb` or `#rrggbb` in either case; anything
@@ -20,24 +21,60 @@ alone.
 
 ## Issue list filters
 
-Issue list filters: `status`, `status_type`, `label` and `exclude_label` (all
-repeatable), `project`, `parent`, `assignee`, `milestone`, `q`, `updated_since`,
-`completed_since`, `archived` (`true` includes archived issues, `only` restricts
-to them), `order_by` (`updated`, `created`, `priority`), `limit` (default 100,
-max 500), `offset`. An unknown parameter is a 400. A filter value that names
+Issue list filters: `status`, `status_type`, `label`, `exclude_label` and
+`priority` (all repeatable; `priority` is `0`-`4` and matches any), `project`,
+`parent`, `assignee`, `milestone`, `created_by` (the actor on the issue's
+creation event), `q`, `updated_since`, `completed_since`, `archived` (`true`
+includes archived issues, `only` restricts to them), `order_by` (`updated`,
+`created`, `priority`), `limit` (default 100, max 500), `offset`, and `view`,
+the name of a saved view whose filter sits under the explicit parameters:
+every field the request leaves empty takes the view's value, so a request can
+narrow or re-sort a view without editing it (`?view=Court&status=Done`). An
+unknown parameter is a 400. A filter value that names
 nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
 or a project slug cannot read as "no work": `status`, `status_type`, `project`,
 `label`, `exclude_label`, `milestone` and `parent` all resolve before the query.
 Assignees are free-form names, so an unknown one is simply an empty result.
 `GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone`,
-`token` or `setting` (a comment or a relation is recorded against its issue);
-any other value is a 404.
+`token`, `setting` or `view` (a comment or a relation is recorded against its
+issue); any other value is a 404.
+
+## Views
+
+A view is a named, stored issue filter: `{"name", "description", "filter",
+"quick_actions", "shared", "owner", "archived_at", ...}`. `filter` holds any of
+`statuses`, `status_types`, `project`, `labels`, `exclude_labels`, `assignee`,
+`milestone`, `priorities` (integers 0-4), `updated_within` (a relative window
+such as `7d`, `48h`, `2w`, resolved against now each time the view is
+applied), `created_by`, `query` and `order_by`; at least one must be set, and
+every name it carries is resolved when the view is saved, so a view cannot
+point at a label or status that does not exist. `quick_actions` is up to four
+`{"name", "status", "priority", "add_labels", "remove_labels"}` objects, the
+one-tap buttons the web board shows on each row of the view; each must change
+something and name a real status and real labels. `shared` defaults to true.
+
+`POST /api/v1/views` creates one (201; a name already in use among live views
+is a 409 `conflict`, case-insensitively). `GET /api/v1/views` lists the views
+the token may see: every shared view plus its own, or every view for an admin
+token; `?archived=true` includes archived ones. `GET /api/v1/views/{name}`
+reads one; a private view of another token's is a 404. `PATCH` changes only
+the fields it includes, and `filter` and `quick_actions` are replaced whole;
+`"archived": true` archives the view, which hides it, frees its name and stops
+it applying (`?view=` then answers 404), and `"archived": false` restores it.
+Only the view's owner (the token that created it, or the `actor` it named) or
+an admin token may PATCH it; anyone else is a 403 `forbidden`. There is no
+DELETE, as everywhere else.
+
+Every write records a `view.created`, `view.updated`, `view.archived` or
+`view.restored` event with the view's name as `entity_key`; `GET
+/api/v1/events?entity=view` reads them.
 
 ## Responses
 
 Every list response is an envelope, never a bare array:
 `{"issues": [...], "next_offset": N|null}`, and `{"comments": [...]}`,
-`{"relations": [...]}`, `{"projects": [...]}` and so on for the rest.
+`{"relations": [...]}`, `{"projects": [...]}`, `{"views": [...]}` and so on
+for the rest.
 `GET /api/v1/events` pages with `{"events": [...], "next_after_id": N|null}`.
 
 ## Writes
@@ -66,12 +103,12 @@ with and the exit code the CLI turns it into.
 |---|---|---|---|
 | `validation` | 400 | 2 | The request itself is malformed: an unknown JSON field or query parameter, a body that is not JSON, a value out of range, a patch with nothing in it, an unknown enum value such as a relation type or a project status |
 | `unauthorized` | 401 | 4 | No bearer token, or one that is unknown or revoked |
-| `forbidden` | 403 | 4 | A real write this token's role may not make: replacing or clearing a description needs an `admin` token |
-| `not_found` | 404 | 3 | The issue, project, milestone or comment does not exist |
-| `conflict` | 409 | 5 | A uniqueness or exclusivity rule: a project name or slug already taken, a milestone name already used in its project, two labels from one exclusive group |
+| `forbidden` | 403 | 4 | A real write this token may not make: replacing or clearing a description needs an `admin` token, and changing a view needs its owner or an `admin` token |
+| `not_found` | 404 | 3 | The issue, project, milestone, comment or view does not exist, or a view is private to another token or archived |
+| `conflict` | 409 | 5 | A uniqueness or exclusivity rule: a project name or slug already taken, a milestone name already used in its project, a view name already in use, two labels from one exclusive group |
 | `version_conflict` | 409 | 5 | `expected_version` did not match, so another writer got there first |
 | `description_replace` | 409 | 5 | The update would overwrite a non-empty description and did not carry `replace_description` |
-| `invalid_ref` | 422 | 2 | A value that has to resolve or has a fixed shape does not: a status, project, milestone, parent or label that names nothing; a title or name that is empty or over 500 characters; a label `color` that is not `#rgb` or `#rrggbb` |
+| `invalid_ref` | 422 | 2 | A value that has to resolve or has a fixed shape does not: a status, project, milestone, parent or label that names nothing; a priority outside 0-4; a title or name that is empty or over 500 characters; a label `color` that is not `#rgb` or `#rrggbb`; a view with an empty filter, a bad `updated_within` window, or a quick action that changes nothing |
 | `busy` | 503 | 6 | SQLite was busy. The response carries `Retry-After: 1` and the CLI retries on its own |
 | `internal` | 500 | 6 | A fault in trackd or the machine under it. The detail goes to the server log, never into the body |
 
@@ -101,11 +138,14 @@ read this number as what it is: the health of the scheduler.
 
 ## MCP
 
-Streamable HTTP at `/mcp`, same bearer auth. Twelve tools: `list_issues`,
+Streamable HTTP at `/mcp`, same bearer auth. Fourteen tools: `list_issues`,
 `get_issue` (returns the issue with comments and relations), `save_issue`,
 `add_comment`, `list_projects`, `save_project`, `list_milestones`,
 `save_milestone`, `list_labels`, `list_statuses`, `save_relation`,
-`list_activity`. `save_relation` with `remove` is idempotent in the same way as
+`list_views`, `save_view`, `list_activity`. `list_issues` takes `view` to
+start from a saved view's filter, plus `priorities` and `created_by`;
+`save_view` takes a required `mode` of `create` or `update` like `save_issue`,
+and is refused to a token that is neither the view's owner nor an admin. `save_relation` with `remove` is idempotent in the same way as
 the REST endpoint and reports `removed` alongside the relations.
 `save_issue` takes a required `mode` of `create` or `update`, so
 a missing key can never turn an update into a new issue, and carries the same

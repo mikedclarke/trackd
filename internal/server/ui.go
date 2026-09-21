@@ -28,6 +28,30 @@ var uiFuncs = template.FuncMap{
 		ts = strings.TrimSuffix(ts, "Z")
 		return strings.Replace(ts, "T", " ", 1)
 	},
+	"has": func(list []string, want string) bool {
+		for _, v := range list {
+			if strings.EqualFold(v, want) {
+				return true
+			}
+		}
+		return false
+	},
+	"hasInt": func(list []int, want int) bool {
+		for _, v := range list {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	},
+	"deref": func(p *int) int {
+		if p == nil {
+			return -1
+		}
+		return *p
+	},
+	// prioWords is the 0-4 priority scale in display order for a form.
+	"prioWords": func() []string { return []string{"none", "P1 urgent", "P2 high", "P3 medium", "P4 low"} },
 }
 
 func parseUITemplate(page string) *template.Template {
@@ -106,7 +130,7 @@ func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 						s.setSessionCookie(w, r, cookie.Value, int(uiSessionTTL/time.Second))
 					}
 				}
-				s.serveAs(next, w, r, session.TokenName)
+				s.serveAs(next, w, r, session.TokenName, session.TokenRole)
 				return
 			}
 		}
@@ -114,7 +138,7 @@ func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 		// health probe reads a page without holding a session.
 		if header, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 			if token, err := s.store.VerifyToken(header); err == nil {
-				s.serveAs(next, w, r, token.Name)
+				s.serveAs(next, w, r, token.Name, token.Role)
 				return
 			}
 		}
@@ -122,14 +146,23 @@ func (s *Server) uiAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// serveAs runs a UI handler with the signed-in token's name on the request:
-// in requestInfo for the log line, and in the context for handlers that
-// attribute writes.
-func (s *Server) serveAs(next http.HandlerFunc, w http.ResponseWriter, r *http.Request, name string) {
+// serveAs runs a UI handler with the signed-in token's name and role on the
+// request: the name in requestInfo for the log line, and both in the context
+// for handlers that attribute writes or decide what a token may see.
+func (s *Server) serveAs(next http.HandlerFunc, w http.ResponseWriter, r *http.Request, name, role string) {
 	if info, ok := r.Context().Value(requestKey).(*requestInfo); ok {
 		info.actor = name
 	}
-	next(w, r.WithContext(context.WithValue(r.Context(), uiActorKey, name)))
+	ctx := context.WithValue(r.Context(), uiActorKey, name)
+	ctx = context.WithValue(ctx, uiRoleKey, role)
+	next(w, r.WithContext(ctx))
+}
+
+// uiIdentity is the signed-in token's name and role, as serveAs stored them.
+func uiIdentity(r *http.Request) (actor, role string) {
+	actor, _ = r.Context().Value(uiActorKey).(string)
+	role, _ = r.Context().Value(uiRoleKey).(string)
+	return actor, role
 }
 
 func (s *Server) uiLoginForm(w http.ResponseWriter, r *http.Request) {
@@ -249,9 +282,16 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 	if workspace == "trackd" {
 		workspace = "" // the default would just repeat the wordmark
 	}
+	tabs, err := s.uiTabs(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.render(w, boardTemplate, map[string]any{
 		"Title":     "board",
 		"Workspace": workspace,
+		"Views":     tabs,
+		"Current":   "",
 		"Columns":   columns,
 		"Projects":  projects,
 		"Labels":    labels,
@@ -298,7 +338,17 @@ func (s *Server) uiIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	actor, _ := r.Context().Value(uiActorKey).(string)
+	statuses, err := s.store.ListStatuses()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	labels, err := s.store.ListLabels()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	actor, _ := uiIdentity(r)
 	s.render(w, issueTemplate, map[string]any{
 		"Title":     issue.Key,
 		"Issue":     issue,
@@ -306,7 +356,10 @@ func (s *Server) uiIssue(w http.ResponseWriter, r *http.Request) {
 		"Comments":  comments,
 		"Relations": relations,
 		"Events":    events,
+		"Statuses":  statuses,
+		"Labels":    labels,
 		"Actor":     actor,
+		"Notice":    noticeFrom(r.URL.Query()),
 	})
 }
 

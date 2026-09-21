@@ -331,6 +331,19 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 		q := "%" + escapeLike(f.Query) + "%"
 		args = append(args, q, q, q, q)
 	}
+	if len(f.Priorities) > 0 {
+		where = append(where, "i.priority IN ("+placeholders(len(f.Priorities))+")")
+		for _, v := range f.Priorities {
+			args = append(args, v)
+		}
+	}
+	if f.CreatedBy != "" {
+		// The creator is the actor on the issue's creation event, which is where
+		// it has always been recorded; the issue row carries no creator column.
+		where = append(where, "EXISTS (SELECT 1 FROM events e WHERE e.entity = 'issue' AND e.entity_id = i.id"+
+			" AND e.action IN ('issue.created', 'issue.imported') AND e.actor = ? COLLATE NOCASE)")
+		args = append(args, f.CreatedBy)
+	}
 	if f.UpdatedSince != "" {
 		where, args = append(where, "i.updated_at >= ?"), append(args, f.UpdatedSince)
 	}
@@ -413,6 +426,11 @@ func validateIssueFilter(tx *sql.Tx, f IssueFilter) error {
 	for _, typ := range f.StatusTypes {
 		if !containsFold(statusTypes, typ) {
 			return fmt.Errorf("status type %q: %w", typ, ErrInvalidRef)
+		}
+	}
+	for _, p := range f.Priorities {
+		if p < 0 || p > 4 {
+			return fmt.Errorf("priority %d out of range 0-4: %w", p, ErrInvalidRef)
 		}
 	}
 	if f.Project != "" {
@@ -593,6 +611,38 @@ func (s *Store) ListComments(issueKey string) ([]Comment, error) {
 		return rows.Err()
 	})
 	return out, err
+}
+
+// LatestComments returns the newest comment on each of the given issues, in
+// one query, for a listing that shows what was last said on every row.
+func (s *Store) LatestComments(issueIDs []int64) (map[int64]Comment, error) {
+	out := map[int64]Comment{}
+	if len(issueIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(issueIDs))
+	for i, id := range issueIDs {
+		args[i] = id
+	}
+	rows, err := s.db.Query(`
+		SELECT c.id, i.key, c.body, c.actor, COALESCE(c.parent_id, 0), c.created_at, c.updated_at, c.issue_id
+		FROM comments c JOIN issues i ON i.id = c.issue_id
+		WHERE c.id IN (SELECT MAX(id) FROM comments WHERE issue_id IN (`+placeholders(len(issueIDs))+`) GROUP BY issue_id)`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c Comment
+		var issueID int64
+		if err := rows.Scan(&c.ID, &c.IssueKey, &c.Body, &c.Actor, &c.ParentID, &c.CreatedAt, &c.UpdatedAt, &issueID); err != nil {
+			return nil, err
+		}
+		out[issueID] = c
+	}
+	return out, rows.Err()
 }
 
 func loadComment(tx *sql.Tx, id int64) (*Comment, error) {

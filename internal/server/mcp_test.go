@@ -115,11 +115,12 @@ func callErr(t *testing.T, session *mcp.ClientSession, name string, args map[str
 	return sb.String()
 }
 
-// The twelve tools of the cutover contract, and nothing else.
+// The twelve tools of the cutover contract plus the two view tools, and
+// nothing else.
 var wantMCPTools = []string{
 	"add_comment", "get_issue", "list_activity", "list_issues", "list_labels",
-	"list_milestones", "list_projects", "list_statuses", "save_issue",
-	"save_milestone", "save_project", "save_relation",
+	"list_milestones", "list_projects", "list_statuses", "list_views", "save_issue",
+	"save_milestone", "save_project", "save_relation", "save_view",
 }
 
 func TestMCPToolList(t *testing.T) {
@@ -474,5 +475,64 @@ func TestMCPRequiresAuth(t *testing.T) {
 	_, err = client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: ts.URL + "/mcp"}, nil)
 	if err == nil {
 		t.Fatal("connected without a token")
+	}
+}
+
+func TestMCPViews(t *testing.T) {
+	session, st := newMCPSession(t)
+	if _, err := st.EnsureLabel("waiting", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []store.IssueInput{
+		{Title: "parked", Status: "Todo", Labels: []string{"waiting"}, Priority: 1},
+		{Title: "free", Status: "Todo"},
+	} {
+		if _, _, err := st.CreateIssue(in, "pm"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var view store.View
+	callTool(t, session, "save_view", map[string]any{
+		"mode": "create", "name": "Waiting on me",
+		"filter":        map[string]any{"statuses": []string{"Todo"}, "labels": []string{"waiting"}},
+		"quick_actions": []map[string]any{{"name": "Answered", "remove_labels": []string{"waiting"}}},
+	}, &view)
+	if view.Owner != "pm" || !view.Shared || len(view.QuickActions) != 1 {
+		t.Fatalf("view = %+v", view)
+	}
+	var views mcpViewsOut
+	callTool(t, session, "list_views", map[string]any{}, &views)
+	if len(views.Views) != 1 || views.Views[0].Name != "Waiting on me" {
+		t.Fatalf("list_views = %+v", views)
+	}
+	var issues mcpIssuesOut
+	callTool(t, session, "list_issues", map[string]any{"view": "waiting on me"}, &issues)
+	if len(issues.Issues) != 1 || issues.Issues[0].Title != "parked" {
+		t.Fatalf("list_issues via view = %+v", issues.Issues)
+	}
+	callTool(t, session, "list_issues", map[string]any{"priorities": []int{1}, "created_by": "pm"}, &issues)
+	if len(issues.Issues) != 1 {
+		t.Fatalf("list_issues by priority and creator = %+v", issues.Issues)
+	}
+	if msg := callErr(t, session, "save_view", map[string]any{"mode": "create", "name": "x"}); !strings.Contains(msg, "[invalid_ref]") {
+		t.Errorf("create without filter = %q", msg)
+	}
+	if msg := callErr(t, session, "list_issues", map[string]any{"view": "nope"}); !strings.Contains(msg, "[not_found]") {
+		t.Errorf("unknown view = %q", msg)
+	}
+
+	// Another agent may read a shared view but not change it.
+	other := mcpSessionAs(t, st, "seo", "agent")
+	callTool(t, other, "list_views", map[string]any{}, &views)
+	if len(views.Views) != 1 {
+		t.Errorf("shared view hidden from another token: %+v", views)
+	}
+	if msg := callErr(t, other, "save_view", map[string]any{"mode": "update", "name": "Waiting on me", "description": "mine"}); !strings.Contains(msg, "[forbidden]") {
+		t.Errorf("update by non-owner = %q", msg)
+	}
+	yes := true
+	callTool(t, session, "save_view", map[string]any{"mode": "update", "name": "Waiting on me", "archived": yes}, &view)
+	if view.ArchivedAt == "" {
+		t.Errorf("archive via save_view = %+v", view)
 	}
 }

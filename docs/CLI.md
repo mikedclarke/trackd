@@ -6,7 +6,8 @@ The client commands talk HTTP to a running server; the server commands operate o
 
 `issue list|show|get|view|create|update|append|comment|relate|events`,
 `comment list|edit`, `events`, `project list|show|create|update`,
-`milestone list|create|update`, `label list|add`, `statuses`, `health` (a table
+`milestone list|create|update`, `label list|add`,
+`view list|show|create|update|delete|restore`, `statuses`, `health` (a table
 of status, version, schema, backup age and integrity, or the raw report with
 `--json`). Connection via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`, or
 a token file named by `$TRACKD_TOKEN_FILE` (tried after `$TRACKD_TOKEN`).
@@ -28,6 +29,45 @@ and `--columns <cols>` or `--tsv` for a flat listing of only the named columns
 table or JSON. `--priority` on `issue create` and `issue update` accepts a word
 (`none|urgent|high|medium|low`) as well as `0-4`, and `--milestone` accepts a
 milestone id as well as a name.
+
+## Views
+
+A view is a saved filter with a name. Create one with any of the filter flags
+`issue list` takes (`--status`, `--type`, `--project`, `--label`,
+`--exclude-label`, `--assignee`, `--milestone`, `--priority`, `--created-by`,
+`-q`, `--order-by`, all as on `issue list`) plus `--updated-within <window>`
+(`7d`, `48h`, `2w`: a relative window, resolved each time the view is
+applied), then open it by name:
+
+```sh
+trackd view create "Waiting on me" --label waiting --status Todo --status "In Progress" \
+  --order-by created --description "parked on a person" \
+  --quick "Answered: remove=waiting" --quick "Ship: status=Done, add=released"
+trackd issue list --view "Waiting on me"                  # the view's rows
+trackd issue list --view "Waiting on me" --status Done    # a flag given here overrides the view's
+trackd view list                                          # every view this token may open
+trackd view show "Waiting on me"
+trackd view update "Waiting on me" --exclude-label ready --clear-order-by --rename Court
+trackd view delete Court                                  # archives it and frees the name
+trackd view restore Court
+```
+
+At least one filter flag is required. A view is shared with every token unless
+created with `--private` (`view update --shared|--private` changes it later),
+and only its owner or an admin token may update or delete it. `--quick` adds a
+quick action, a one-tap button on every row of the view in the web board:
+`"Name: key=value, ..."` with keys `status`, `priority`, `add` and `remove`
+(the label keys repeat), up to four per view. On `view update`, the filter is
+read, amended by the flags given and written back whole, so one flag changes
+one field; a list flag such as `--status` replaces that list, and each field
+has a `--clear-*` flag (`--clear-statuses`, `--clear-types`, `--clear-labels`,
+`--clear-exclude-labels`, `--clear-priorities`, `--clear-project`,
+`--clear-assignee`, `--clear-milestone`, `--clear-updated-within`,
+`--clear-created-by`, `--clear-q`, `--clear-order-by`). `--quick` given once or
+more replaces the whole quick-action set; `--clear-quick` empties it.
+
+`issue list` also gained `--priority` (repeatable, `0-4` or a word, matches
+any) and `--created-by <actor>`, both usable with or without `--view`.
 
 ## Labels and titles
 

@@ -310,6 +310,10 @@ func issueList(args []string) error {
 	milestone := fs.String("milestone", "", "filter by milestone name")
 	queryFlag := fs.String("q", "", "substring search over key, title, description and comments")
 	search := fs.String("search", "", "alias for -q")
+	var priorities stringSlice
+	fs.Var(&priorities, "priority", "filter by priority: 0-4 or a word (repeatable, matches any)")
+	createdBy := fs.String("created-by", "", "only issues created by this actor")
+	view := fs.String("view", "", "start from a saved view's filter; the other flags narrow or re-sort it")
 	updatedSince := fs.String("updated-since", "", "only issues updated at or after this RFC3339 time")
 	completedSince := fs.String("completed-since", "", "only issues completed at or after this RFC3339 time")
 	archived := fs.Bool("archived", false, "include archived issues")
@@ -337,8 +341,16 @@ func issueList(args []string) error {
 	q := client.IssueQuery{
 		Statuses: statuses, StatusTypes: types, Labels: labels, ExcludeLabels: excludeLabels,
 		Project: *project, Parent: *parent, Assignee: *assignee, Milestone: *milestone,
-		Query: query, UpdatedSince: *updatedSince, CompletedSince: *completedSince,
+		Query: query, CreatedBy: *createdBy, View: *view,
+		UpdatedSince: *updatedSince, CompletedSince: *completedSince,
 		OrderBy: *orderBy, Limit: *limit, Offset: *offset,
+	}
+	for _, raw := range priorities {
+		p, err := parsePriority(raw)
+		if err != nil {
+			return err
+		}
+		q.Priorities = append(q.Priorities, p)
 	}
 	switch {
 	case *archivedOnly:
@@ -894,7 +906,7 @@ func cmdEvents(args []string) error {
 	common := addCommon(fs)
 	since := fs.String("since", "", "only events at or after this RFC3339 time")
 	afterID := fs.Int64("after-id", 0, "only events after this event id (the cursor from a previous run)")
-	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone, token or setting (a comment or a relation is recorded against its issue)")
+	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone, token, setting or view (a comment or a relation is recorded against its issue)")
 	limit := fs.Int("limit", 0, "maximum events (default 100, max 1000)")
 	if err := parseFlags(fs, args, "trackd events [flags]"); err != nil {
 		return err

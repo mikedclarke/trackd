@@ -134,6 +134,20 @@ type dumpToken struct {
 	RevokedAt  *string `json:"revoked_at,omitempty"`
 }
 
+type dumpView struct {
+	Record      string  `json:"record"`
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Filter      string  `json:"filter"`
+	Quick       string  `json:"quick"`
+	Owner       string  `json:"owner"`
+	Shared      int     `json:"shared"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+	ArchivedAt  *string `json:"archived_at,omitempty"`
+}
+
 type dumpEvent struct {
 	Record    string          `json:"record"`
 	ID        int64           `json:"id"`
@@ -232,6 +246,12 @@ func (s *Store) ExportDump(w io.Writer) error {
 		if err := exportRows(tx, "SELECT id, name, hash, role, created_at, last_used_at, revoked_at FROM tokens ORDER BY id", func(scan rowScanner) (any, error) {
 			r := dumpToken{Record: "token"}
 			return r, scan.Scan(&r.ID, &r.Name, &r.Hash, &r.Role, &r.CreatedAt, &r.LastUsedAt, &r.RevokedAt)
+		}, write); err != nil {
+			return err
+		}
+		if err := exportRows(tx, "SELECT id, name, description, filter_json, quick_json, owner, shared, created_at, updated_at, archived_at FROM views ORDER BY id", func(scan rowScanner) (any, error) {
+			r := dumpView{Record: "view"}
+			return r, scan.Scan(&r.ID, &r.Name, &r.Description, &r.Filter, &r.Quick, &r.Owner, &r.Shared, &r.CreatedAt, &r.UpdatedAt, &r.ArchivedAt)
 		}, write); err != nil {
 			return err
 		}
@@ -459,6 +479,16 @@ func importLine(tx *sql.Tx, line []byte, schema int) error {
 		_, err := tx.Exec(
 			"INSERT INTO tokens (id, name, hash, role, created_at, last_used_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			r.ID, r.Name, r.Hash, r.Role, r.CreatedAt, r.LastUsedAt, r.RevokedAt,
+		)
+		return err
+	case "view":
+		var r dumpView
+		if err := decodeRecord(line, &r); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			"INSERT INTO views (id, name, description, filter_json, quick_json, owner, shared, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			r.ID, r.Name, r.Description, r.Filter, r.Quick, r.Owner, r.Shared, r.CreatedAt, r.UpdatedAt, r.ArchivedAt,
 		)
 		return err
 	case "event":

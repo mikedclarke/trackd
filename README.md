@@ -146,6 +146,17 @@ affair on a phone.
 - **Comments** can reply to another comment (`--parent ID`) and can be edited
   (`trackd comment edit ID --body ...`). An edit keeps the original in the audit
   trail.
+- **Views** are saved issue filters with a name, so a queue can be opened by
+  name from any interface: `trackd view create "Waiting on me" --label
+  waiting --status Todo --status "In Progress" --order-by created`, then
+  `trackd issue list --view "Waiting on me"`, `list_issues` with `view` over
+  MCP, or the tab of the same name on the web board. A view filters on any of
+  status, status type, project, labels, excluded labels, assignee, milestone,
+  priority, creator, a relative window (`--updated-within 7d`), text and sort
+  order. A view is shared with every token unless made `--private`; only its
+  owner or an admin can change it. Up to four **quick actions** (`--quick
+  "Answered: remove=waiting"`) become one-tap buttons on every row of the view
+  in the web board. Deleting a view archives it, which frees its name.
 - **Timestamps** are UTC RFC3339 with milliseconds (`2026-01-02T15:04:05.000Z`).
   Every timestamp parameter accepts RFC3339 with any offset and is converted;
   dates (due, start, target) are plain `YYYY-MM-DD`.
@@ -170,15 +181,15 @@ affair on a phone.
 
 ### REST
 
-Everything is under `/api/v1` with bearer auth. Issues, comments, relations, projects, milestones, labels, statuses and a global activity feed; list responses are envelopes with paging cursors; PATCH changes only the fields it includes; every error is `{"error", "code"}`; `GET /healthz` is unauthenticated. There are no DELETE endpoints by design. The ten error codes are tabled with their HTTP status and CLI exit code in [docs/API.md](docs/API.md), along with the full reference and the list filters.
+Everything is under `/api/v1` with bearer auth. Issues, comments, relations, projects, milestones, labels, statuses, saved views and a global activity feed; list responses are envelopes with paging cursors; PATCH changes only the fields it includes; every error is `{"error", "code"}`; `GET /healthz` is unauthenticated. There are no DELETE endpoints by design. The ten error codes are tabled with their HTTP status and CLI exit code in [docs/API.md](docs/API.md), along with the full reference and the list filters.
 
 ### CLI
 
-`trackd issue|comment|events|project|milestone|label|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 1 unexpected, 2 usage or validation, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. On the body-bearing commands (`issue append`, `issue comment`, `comment edit`) `--text` and `--body` are interchangeable. Details in [docs/CLI.md](docs/CLI.md).
+`trackd issue|comment|events|project|milestone|label|view|statuses|health` talk to a running server via `--url`/`--token` or `$TRACKD_URL`/`$TRACKD_TOKEN`; `trackd serve|token|setting|backup|restore|export|import` operate on the database file. Every client command takes `--json`, exit codes are stable (0 ok, 1 unexpected, 2 usage or validation, 3 not found, 4 auth, 5 conflict, 6 server or network), and a bare empty string is never accepted as a value, so a shell variable that did not expand cannot blank a field. On the body-bearing commands (`issue append`, `issue comment`, `comment edit`) `--text` and `--body` are interchangeable. Details in [docs/CLI.md](docs/CLI.md).
 
 ### MCP
 
-Streamable HTTP at `/mcp`, same bearer auth, twelve tools (`list_issues`, `get_issue`, `save_issue`, `add_comment`, `list_projects`, `save_project`, `list_milestones`, `save_milestone`, `list_labels`, `list_statuses`, `save_relation`, `list_activity`). Read tools are annotated read-only and nothing in the set is destructive. For Claude Code, add to `.mcp.json`:
+Streamable HTTP at `/mcp`, same bearer auth, fourteen tools (`list_issues`, `get_issue`, `save_issue`, `add_comment`, `list_projects`, `save_project`, `list_milestones`, `save_milestone`, `list_labels`, `list_statuses`, `save_relation`, `list_views`, `save_view`, `list_activity`). Read tools are annotated read-only and nothing in the set is destructive. For Claude Code, add to `.mcp.json`:
 
 ```json
 {
@@ -194,11 +205,23 @@ Streamable HTTP at `/mcp`, same bearer auth, twelve tools (`list_issues`, `get_i
 
 ### Web UI
 
-Server-rendered, zero JavaScript, embedded in the binary. A board grouped by
-status with project/label/assignee filters, and an issue page with description,
-comments, relations, and the audit trail. Sign in once with any API token. The
-one write the board offers is posting a comment from the issue page, attributed
-to the signed-in token; every other write goes through the API, CLI, and MCP.
+Server-rendered, embedded in the binary, and usable from a phone. A board
+grouped by status with project/label/assignee filters, a tab for every saved
+view, and an issue page with description, comments, relations, and the audit
+trail. Sign in once with any API token.
+
+A view page is the place to work a queue: each row opens inline to show the
+latest comment, a reply box, the view's quick-action buttons, and a status,
+priority and label form. Every write goes through the same store path as the
+API, is attributed to the signed-in token, records the same audit event, and
+carries the issue version the page was rendered with, so a change that lost a
+race to another writer is refused with a notice instead of overwriting (the
+reply typed with it is still saved). Views can be created and edited from the
+board too (`+ view`). The issue page has the same action form beside its
+comment box. The only script on any page is the issue page's "use as reply"
+button.
+
+![a view with a row open](docs/view.jpeg)
 
 ![an issue page](docs/issue.jpeg)
 

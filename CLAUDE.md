@@ -1,8 +1,9 @@
 # trackd
 
 Self-hosted task tracker for AI agents. Single Go binary: SQLite storage, REST API,
-CLI, MCP endpoint, embedded web UI (reads everything; the one write it offers is
-posting a comment).
+CLI, MCP endpoint, embedded web UI (the board, saved views as tabs, an issue
+page; writes are comments, replies, status, priority, label and quick-action
+changes from a view row or the issue page, plus creating and editing views).
 
 ## Commands
 
@@ -18,14 +19,17 @@ posting a comment).
 - `main.go`: entry point, subcommand dispatch, server-side commands (serve,
   token, setting, backup, restore, export, import), exit-code mapping
 - `cli.go`: client commands (issue, comment, events, project, milestone, label,
-  statuses, health) that talk HTTP to a running server
+  statuses, health) that talk HTTP to a running server; `cli_views.go` is the
+  `view` group
 - `internal/store`: SQLite storage layer. Schema migrations, CRUD, audit events,
   backup/restore, JSONL export/import, Linear CSV importer, the advisory file
   lock, and the operator settings (`settings.go`: the known keys and their
   validation). All writes go through this package.
-- `internal/server`: HTTP layer. REST API and bearer auth, MCP endpoint
-  (`mcp.go`), embedded zero-JS web UI (`ui.go`, templates in `ui/`), backup
-  scheduler, health checker
+- `internal/server`: HTTP layer. REST API and bearer auth (`handlers.go`,
+  `views.go`), MCP endpoint (`mcp.go`), embedded web UI (`ui.go` for auth,
+  board and issue page; `ui_views.go` for view pages, the view editor and the
+  one form-post write path `POST /ui/issue/{key}/action`; templates in `ui/`),
+  backup scheduler, health checker
 - `internal/client`: HTTP client used by the CLI. `client.go` is the transport
   (retries, timeout, `APIError`); `api.go` holds the typed calls that own the
   JSON field names and unwrap the list envelopes.
@@ -40,6 +44,11 @@ posting a comment).
   description is refused unless the request carries `replace_description`, which
   in turn needs an `admin` token (403 `forbidden` otherwise). Keep it that way:
   it is what stops one agent erasing another's context.
+- **The web UI writes through the store like the API.** A form post goes
+  through the same store method, carries `expected_version` from the page it
+  was rendered on, and records the same audit event. No UI-only write paths.
+- **Views are owned.** Only the owner token or an admin changes a view; a
+  private view answers 404 to anyone else. Archiving frees the name.
 - **One writer.** `serve` holds an exclusive advisory lock on the database file.
   Commands that only read (`export`, `backup`, `token list`, `setting list|get`)
   open read-only; commands that write (`token add`, `token revoke`,

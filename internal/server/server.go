@@ -98,6 +98,10 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/labels", s.handleListLabels)
 	api.HandleFunc("POST /api/v1/labels", s.handleEnsureLabel)
 	api.HandleFunc("GET /api/v1/statuses", s.handleListStatuses)
+	api.HandleFunc("GET /api/v1/views", s.handleListViews)
+	api.HandleFunc("POST /api/v1/views", s.handleCreateView)
+	api.HandleFunc("GET /api/v1/views/{name}", s.handleGetView)
+	api.HandleFunc("PATCH /api/v1/views/{name}", s.handlePatchView)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -111,6 +115,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.uiAuth(s.uiBoard))
 	mux.HandleFunc("GET /ui/issue/{key}", s.uiAuth(s.uiIssue))
 	mux.HandleFunc("POST /ui/issue/{key}/comments", s.uiAuth(s.uiIssueComment))
+	mux.HandleFunc("POST /ui/issue/{key}/action", s.uiAuth(s.uiIssueAction))
+	mux.HandleFunc("GET /ui/views/new", s.uiAuth(s.uiViewNew))
+	mux.HandleFunc("POST /ui/views", s.uiAuth(s.uiViewCreate))
+	mux.HandleFunc("GET /ui/view/{name}", s.uiAuth(s.uiView))
+	mux.HandleFunc("GET /ui/view/{name}/edit", s.uiAuth(s.uiViewEdit))
+	mux.HandleFunc("POST /ui/view/{name}", s.uiAuth(s.uiViewUpdate))
 	mux.HandleFunc("GET /ui/login", s.uiLoginForm)
 	mux.HandleFunc("POST /ui/login", s.uiLoginSubmit)
 	mux.HandleFunc("GET /ui/logout", s.uiLogout)
@@ -134,6 +144,7 @@ const (
 	// handlers, so a comment posted from the board is attributed exactly like
 	// one posted over the API.
 	uiActorKey
+	uiRoleKey
 )
 
 // requestInfo carries what the log line needs but only the inner handlers
@@ -574,7 +585,7 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, codeNotFound
 	case errors.Is(err, store.ErrBusy):
 		return http.StatusServiceUnavailable, codeBusy
-	case errors.Is(err, errAdminOnly):
+	case errors.Is(err, errAdminOnly), errors.Is(err, errViewOwner):
 		return http.StatusForbidden, codeForbidden
 	case isInternal(err):
 		return http.StatusInternalServerError, codeInternal
