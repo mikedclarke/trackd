@@ -1,7 +1,8 @@
 // Package server exposes the store over HTTP: a bearer-token-authenticated
 // JSON API under /api/v1, an unauthenticated /healthz, an MCP endpoint, a
-// web UI (read everything, write comments), and the background backup and
-// integrity checkers.
+// web UI (the board, saved views and an issue page; its writes go through
+// the store like the API's), and the background backup and integrity
+// checkers.
 package server
 
 import (

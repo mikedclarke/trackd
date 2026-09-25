@@ -1,41 +1,49 @@
 # trackd
 
-Self-hosted task and project tracking for AI agents. One binary, one SQLite file,
-three interfaces: REST API, CLI, and MCP, plus a web board for humans: browse,
-filter, and comment; every other write stays with the agents' interfaces.
+Self-hosted task tracking for AI agents. One binary, one SQLite file, three
+agent interfaces (REST, CLI, MCP) and a small web board for the people working
+alongside them, usable from a phone.
 
 ![the trackd board](docs/board.jpeg)
 
-> **Status: early release.** trackd is feature-complete for its purpose and runs
-> a real multi-agent workload daily, but it is young: expect rough edges, and
-> read the [Data safety](#data-safety) section before trusting it with the only
-> copy of anything.
+> **Status: early, in daily use.** trackd runs a real multi-agent workload every
+> day (several coding agents, a local-model agent and one human sharing one
+> server), but it is young: expect rough edges, and read
+> [Data safety](#data-safety) before trusting it with the only copy of anything.
 
 ## Why
 
-AI agents need durable, queryable task storage more than they need another project
-management app. trackd is that storage: a tracker whose primary users are agents,
-over MCP, a CLI, or plain HTTP, with a minimal web UI for humans who want to
-glance at the board.
+Agents now do real work off a task list, and the tracker they work from is
+also the tracker they can wreck: one confused agent, one `--force`, one
+well-meant cleanup, and the history every other agent depends on is gone.
+trackd starts from the opposite assumption. Agents make mistakes, so the store
+has to make the mistakes harmless.
 
-- **Never lose data.** Full-synchronous WAL writes. No hard-delete endpoints:
-  issues are archived or canceled, never destroyed, so no agent bug can wipe your
-  history. Descriptions are append-only unless an overwrite is asked for in so
-  many words. Every mutation records an audit event with before/after state.
-  Built-in scheduled backups with integrity checks, plain-text JSONL export, and
-  automatic snapshots before schema migrations.
-- **Single binary.** No runtime, no containers required, no external database, no
-  build step. Pure Go, cross-compiled for macOS, Linux, and Windows.
-- **Agent-native.** Give each agent its own API token and every comment and audit
-  event is attributed automatically. Strict request validation: unknown JSON
-  fields and unknown query parameters are rejected, so an agent's typo fails
-  loudly instead of silently doing nothing.
+- **Nothing an agent does can destroy history.** There are no delete endpoints:
+  issues are archived or canceled, never removed. Descriptions are append-only
+  unless an admin asks for an overwrite in so many words. Every mutation records
+  an audit event with before and after state. Backups are scheduled, verified
+  with an integrity check, and taken automatically before every schema
+  migration. Full-synchronous WAL writes. Plain JSONL export with a byte-exact
+  round trip, so nothing is locked in.
+- **Every write has a name on it.** Each agent gets its own API token, and
+  every comment and audit event is attributed to it automatically. "Which agent
+  did this" always has an answer.
 - **Safe to retry.** Creates take an idempotency key, updates take an expected
-  version, and every error carries a machine-readable code. An agent that loses
-  its connection mid-write can repeat the call without wondering what happened.
-- **Import from Linear.** One command migrates a Linear CSV export (issues, keys,
-  projects, labels, relations, timestamps) with a `--dry-run` mode that validates
-  everything first.
+  version, every error carries a machine-readable code and the CLI maps them to
+  stable exit codes. Unknown JSON fields and unknown query parameters are
+  rejected, so a typo fails loudly instead of silently doing nothing.
+- **One server, every agent, and you.** Not a per-repo file and not a hosted
+  service: a single process on your own machine or private network that Claude
+  Code, any other MCP or HTTP client, a local model and your phone all talk to,
+  for code and non-code work alike. A person approves, replies and reprioritises
+  from the web board; agents do everything else through the API.
+- **Boring on purpose.** Pure Go, no CGO, two direct dependencies (the SQLite
+  driver and the official MCP SDK). No runtime, no containers, no external
+  database, no build step. Cross-compiled for macOS, Linux and Windows.
+
+trackd imports a Linear CSV export in one command, keys and all, if that is
+where you are coming from.
 
 ## Install
 
@@ -70,114 +78,41 @@ export TRACKD_URL=http://127.0.0.1:8484 TRACKD_TOKEN=td_...
 
 curl -s $TRACKD_URL/api/v1/issues \
   -H "Authorization: Bearer $TRACKD_TOKEN" \
-  -d '{"title": "First issue", "status": "Todo", "labels": ["agent-ready"]}'
+  -d '{"title": "First issue", "status": "Todo"}'
 ```
 
-Or use the CLI, which talks to the same server:
+Or use the CLI, which talks to the same server. Labels must exist before they
+can be applied, so create one first:
 
 ```sh
-trackd label add agent-ready
-trackd issue create --title "First issue" --status Todo --label agent-ready
-trackd issue list --label agent-ready --order-by priority
+trackd label add ready
+trackd issue create --title "First issue" --status Todo --label ready
+trackd issue list --label ready --order-by priority
 trackd issue update TSK-1 --status "In Progress" --actor builder
 trackd issue append TSK-1 --text "found the cause, see the comment" --actor builder
 trackd issue comment TSK-1 --body "done, see the PR" --actor builder
 trackd issue show TSK-1
 ```
 
-Open the same URL in a browser for the web board (sign in with a token; the
-browser stays signed in until you sign out, across server restarts). The board
-filters by project, label, and assignee, and a filtered URL like
-`/?label=needs-review` is a bookmarkable view. The issue page takes comments,
-attributed to the token you signed in with; "use as reply" copies an existing
-comment into the reply box, which makes approve-by-reply workflows a two-tap
-affair on a phone.
+Mint a token per agent (`trackd token add builder`) and drop the `--actor`:
+writes are attributed to the token that made them.
 
-## Concepts
+Open the same URL in a browser for the web board. Sign in with a token and the
+browser stays signed in until you sign out. Filter by project, label and
+assignee, save a filter as a named view, and work a view's rows from a phone:
+reply, change status, priority or labels, or press a quick action.
 
-- **Issues** have a stable key (`TSK-1`), a status, a 0-4 priority (1 = urgent,
-  4 = low), labels, an optional project, parent, assignee, and milestone,
-  relations (`blocks`, `relates`, `duplicate`), comments, an integer `version`,
-  and a full activity log. Titles are trimmed and capped at 500 characters.
-  Removing a relation is idempotent: `trackd issue relate A B --remove` exits 0
-  whether or not the relation was there, and says which, so a retry is safe.
-- **Descriptions are append-only.** Once an issue has a description, an update
-  that would overwrite it is refused with a 409. Add to it with
-  `trackd issue append KEY --text ...`, or pass `--replace-description` to say
-  you meant to overwrite. This is the rule that stops one agent erasing another
-  agent's context. Overwriting is also the one write a role decides:
-  `--replace-description` and `--clear-description` need an `admin` token, and
-  an `agent` token is refused with a 403 (`forbidden`, CLI exit 4).
-- **Labels are added and removed, not replaced.** `--add-label` and
-  `--remove-label` leave the rest of the set alone; `--labels` still replaces the
-  whole set when that is what you want, and `--clear-labels` empties it. Labels
-  must exist before they can be applied: `trackd label add <name>` (or the label
-  endpoint) is the only place a label is created, so a typo cannot invent one. A
-  label's optional `--color` is a hex color, `#rgb` or `#rrggbb`.
-  Label groups can be exclusive: configure
-  `trackd setting set label_groups '[["ready","blocked"]]'` and an issue holds at
-  most one label from each group, so adding one removes the other and a
-  replacement set holding both is rejected. No groups are configured by
-  default. Label, status, project slug, milestone and issue key lookups are
-  case-insensitive.
-- **Versions make concurrent updates safe.** Every issue carries a `version` that
-  increments on each write. Pass `--expected-version N` (`expected_version` in
-  the API) and a write that lost the race fails with a 409 instead of quietly
-  overwriting. Leave it out and the last writer wins, as before. A patch that
-  changes nothing (a label the issue already has, its current priority) is
-  not a write: the version stays and no event is recorded.
-- **Idempotency keys make creates safe to repeat.** Pass `--idempotency-key` when
-  creating an issue or a comment; a second create with the same key returns the
-  first record rather than making a duplicate.
-- **Assignees** are free-form names, a person or an agent. Filter by them
-  everywhere (`trackd issue list --assignee pm`); routing work between humans
-  and agents is the point.
-- **Milestones** belong to a project and carry an optional target date. Issues
-  reference one by name within their project; moving an issue to another
-  project clears a milestone that no longer applies. Milestone names are unique
-  among a project's unarchived milestones.
-- **Statuses** are workflow states with a type: `triage`, `backlog`, `unstarted`,
-  `started`, `completed`, `canceled`. The defaults mirror a common agent workflow
-  (Triage, Backlog, Todo, In Progress, In Review, Done); importing from Linear
-  carries any extra statuses across. Entering a completed or canceled status
-  stamps `completed_at` or `canceled_at`, and leaving it clears the stamp;
-  `started_at` is sticky once set.
-- **Projects** group issues and carry their own labels, a status from `backlog`,
-  `planned`, `started`, `paused`, `completed` and `canceled`, and optional
-  `start_date`, `target_date` and `completed_at` dates.
-- **Comments** can reply to another comment (`--parent ID`) and can be edited
-  (`trackd comment edit ID --body ...`). An edit keeps the original in the audit
-  trail.
-- **Views** are saved issue filters with a name, so a queue can be opened by
-  name from any interface: `trackd view create "Waiting on me" --label
-  waiting --status Todo --status "In Progress" --order-by created`, then
-  `trackd issue list --view "Waiting on me"`, `list_issues` with `view` over
-  MCP, or the tab of the same name on the web board. A view filters on any of
-  status, status type, project, labels, excluded labels, assignee, milestone,
-  priority, creator, a relative window (`--updated-within 7d`), text and sort
-  order. A view is shared with every token unless made `--private`; only its
-  owner or an admin can change it. Up to four **quick actions** (`--quick
-  "Answered: remove=waiting"`) become one-tap buttons on every row of the view
-  in the web board. Deleting a view archives it, which frees its name.
-- **Timestamps** are UTC RFC3339 with milliseconds (`2026-01-02T15:04:05.000Z`).
-  Every timestamp parameter accepts RFC3339 with any offset and is converted;
-  dates (due, start, target) are plain `YYYY-MM-DD`.
-- **Tokens are identities.** Mint one per agent (`trackd token add pm`). Writes
-  are attributed to the token's name unless the request passes an explicit
-  `actor`. Roles: `agent` (the default) or `admin`. Every write is open to both
-  except one: replacing or clearing a description, which needs `admin`. Give the
-  agents `agent` tokens and keep an `admin` token for yourself.
-- **Settings** live in the database and are read and written with
-  `trackd setting list|get|set`. Five are writable: `issue_prefix` (the key
-  prefix for new issues, `TSK` by default; existing keys keep theirs),
-  `label_groups` (the exclusive groups above), `base_url` (the server's
-  public URL, used to fill each issue's `url` field for links in agent output),
-  `agent_label` (a label auto-applied to issues created by non-admin tokens;
-  empty by default, which disables it) and `workspace_name` (the name shown in
-  the web board header; empty shows just the wordmark). A sixth, `issue_seq`
-  (the last issue number handed out), is read-only.
-  Every change is audited. `set` writes to the database file directly, so it
-  refuses while a server is running: stop the server, set, start it again.
+## Concepts, briefly
+
+Issues have a stable key, a status, a 0-4 priority, labels, an optional
+project, parent, assignee, milestone and due date, relations, comments, an
+integer version and a full activity log. Descriptions are append-only. Labels
+are added and removed, not replaced, and must exist before use. Statuses have a
+type (`triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled`).
+Projects carry milestones and dates. Views are saved filters with optional
+one-tap quick actions. Tokens are identities with a role, `agent` or `admin`.
+Settings live in the database. The full rules, with every flag and edge case,
+are in [docs/CONCEPTS.md](docs/CONCEPTS.md).
 
 ## Interfaces
 
