@@ -22,7 +22,7 @@ These are the constraints the project exists to uphold. A pull request that weak
 ## Working on the code
 
 ```sh
-make build      # bin/trackd, version stamped from git
+make build      # bin/trackd; the version is the const in main.go, bumped at release time
 make test       # go test -race ./...
 make lint       # gofmt, go vet, golangci-lint when installed
 ```

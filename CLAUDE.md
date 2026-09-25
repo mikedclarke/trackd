@@ -9,7 +9,11 @@ changes from a view row or the issue page, plus creating and editing views).
 
 - Build: `make build` (compiles to `bin/trackd`); `go build ./...` for a quick
   compile check. The version is a hand-bumped `const` in `main.go`; `make dist`
-  builds the release archives and refuses a dirty tree unless `ALLOW_DIRTY=1`
+  builds the release archives and refuses a dirty tree unless `ALLOW_DIRTY=1`.
+  Versioning: this is a long-lived 0.x project, so bump the patch (0.0.1) for
+  fixes and hotfixes and the minor (0.1.0) for a release that adds features or
+  changes a contract; several patch releases between minors is the normal
+  rhythm, and a roadmap phase never maps to a version number
 - Test: `make test` (`go test -race ./...`)
 - Lint: `make lint` (gofmt check, `go vet ./...`, golangci-lint when installed)
 - Format: `gofmt -w .`
@@ -59,6 +63,10 @@ changes from a view row or the issue page, plus creating and editing views).
   use neutral names (`ACME`, `ready`, `blocked`, `Alex`).
 - Pure Go, no CGO, so releases cross-compile.
 - Keep dependencies minimal; justify any new one.
+- Keep it simple. No abstraction, layer, option or flag without a present need
+  in the code; the plain version that is easy to read and test beats the
+  general one. A refactor earns its place by removing duplication that exists
+  today, not by preparing for features that might come.
 
 ## Contracts worth knowing before you change anything
 
