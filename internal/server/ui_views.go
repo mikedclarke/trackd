@@ -94,8 +94,20 @@ type viewRow struct {
 
 // viewRowAction is a quick action as the row's form posts it.
 type viewRowAction struct {
-	Index int
-	Name  string
+	Name string
+}
+
+// quickActionByName finds a view's quick action by its (unique) name.
+func quickActionByName(view *store.View, name string) (store.QuickAction, bool) {
+	if view == nil {
+		return store.QuickAction{}, false
+	}
+	for _, q := range view.QuickActions {
+		if q.Name == name {
+			return q, true
+		}
+	}
+	return store.QuickAction{}, false
 }
 
 func (s *Server) uiView(w http.ResponseWriter, r *http.Request) {
@@ -134,8 +146,8 @@ func (s *Server) uiView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var actions []viewRowAction
-	for i, q := range view.QuickActions {
-		actions = append(actions, viewRowAction{Index: i, Name: q.Name})
+	for _, q := range view.QuickActions {
+		actions = append(actions, viewRowAction{Name: q.Name})
 	}
 	rows := make([]viewRow, len(issues))
 	for i, issue := range issues {
@@ -257,13 +269,16 @@ func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if do := r.PostFormValue("do"); strings.HasPrefix(do, "quick:") {
-		index, err := strconv.Atoi(strings.TrimPrefix(do, "quick:"))
-		view, verr := s.visibleView(r.PostFormValue("view"), actor, role)
-		if err != nil || verr != nil || index < 0 || index >= len(view.QuickActions) {
+		// The button posts the action's name, not its position, so a view
+		// edited between the page render and the tap applies the action the
+		// person read or nothing at all.
+		view, err := s.visibleView(r.PostFormValue("view"), actor, role)
+		q, ok := quickActionByName(view, strings.TrimPrefix(do, "quick:"))
+		if err != nil || !ok {
 			fail("that quick action no longer exists; reload the view")
 			return
 		}
-		patch = mergePatch(patch, view.QuickActions[index].Patch())
+		patch = mergePatch(patch, q.Patch())
 	}
 	if patchEmpty(patch) {
 		if strings.TrimSpace(body) == "" {

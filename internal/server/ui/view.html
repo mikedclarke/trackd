@@ -52,7 +52,7 @@
         <textarea name="body" rows="3" placeholder="Reply as {{$.Actor}}…"></textarea>
         <div class="row-actions">
           <button type="submit" name="do" value="reply">Reply</button>
-          {{range .Actions}}<button type="submit" name="do" value="quick:{{.Index}}" class="quick">{{.Name}}</button>{{end}}
+          {{range .Actions}}<button type="submit" name="do" value="quick:{{.Name}}" class="quick">{{.Name}}</button>{{end}}
         </div>
         <details class="row-more">
           <summary>change status, priority or labels</summary>

@@ -7,6 +7,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-25
+
+### Fixed
+
+- The exclusive lock is taken before the database file is opened, not after
+  its integrity check and migrations have run. A `token add`, `setting set`,
+  `import` or `restore` aimed at a database a server is serving now refuses
+  before touching the file; until now it migrated the live file first and
+  refused afterwards. `store.Options.Exclusive` replaces the separate
+  `LockExclusive` step, and `Close` releases the lock.
+- A patch that changes nothing (a label the issue already has, its current
+  priority or status, an archive of an archived issue) is a no-op: the version
+  does not move and no event is recorded, so a repeated or redundant write can
+  no longer make another writer's `expected_version` fail.
+- Issue keys are matched case-insensitively (`trackd issue show gdl-12`), like
+  every other lookup already was.
+- `label` and `exclude_label` given with a view are added to the view's own
+  labels instead of replacing them, so an explicit label narrows the view as
+  the docs said it did.
+- Quick action buttons on a view row post the action's name rather than its
+  position, so a view edited between the page render and the tap applies the
+  action the person read, or refuses, never a neighbour.
+- A request that died (context canceled or timed out), a transaction the
+  driver gave up on, or a value the JSON encoder could not write is reported
+  as a 500 `internal`, not a 400 `validation`, so an agent knows to retry
+  rather than blame its input.
+
 ## [0.3.1] - 2026-09-21
 
 ### Added

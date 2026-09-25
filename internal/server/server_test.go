@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -967,6 +968,9 @@ func TestClassifyErrors(t *testing.T) {
 		{"integrity", fmt.Errorf("x: %w", store.ErrIntegrity), http.StatusInternalServerError, codeInternal},
 		{"filesystem", &os.PathError{Op: "open", Path: "/nope", Err: errors.New("no such file")}, http.StatusInternalServerError, codeInternal},
 		{"plain validation", errors.New("priority 9 out of range 0-4"), http.StatusBadRequest, codeValidation},
+		{"request context gone", fmt.Errorf("list: %w", context.Canceled), http.StatusInternalServerError, codeInternal},
+		{"transaction gone", fmt.Errorf("update: %w", sql.ErrTxDone), http.StatusInternalServerError, codeInternal},
+		{"encoder fault", &json.UnsupportedTypeError{}, http.StatusInternalServerError, codeInternal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, code := classify(tc.err)

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -128,10 +129,10 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 			return nil, fmt.Errorf("due date: %w", err)
 		}
 	}
-	var out *Issue
+	var before, out *Issue
 	err := s.tx(func(tx *sql.Tx) error {
-		before, err := loadIssue(tx, key)
-		if err != nil {
+		var err error
+		if before, err = loadIssue(tx, key); err != nil {
 			return err
 		}
 		if p.ExpectedVersion != nil && *p.ExpectedVersion != before.Version {
@@ -245,9 +246,30 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 		if err != nil {
 			return err
 		}
+		if sameIssue(before, out) {
+			return errNoChange
+		}
 		return recordEvent(tx, "issue", before.ID, actor, "issue.updated", before, out)
 	})
+	if errors.Is(err, errNoChange) {
+		// A patch that changes nothing is not a write: no version bump, no
+		// event, so a stale-looking retry or a phone tap on the current value
+		// cannot make another writer's expected_version fail.
+		return before, nil
+	}
 	return out, err
+}
+
+// errNoChange rolls back an update whose result equals its starting point.
+var errNoChange = errors.New("no change")
+
+// sameIssue compares two loads of an issue, ignoring the two fields every
+// write touches unconditionally.
+func sameIssue(a, b *Issue) bool {
+	x, y := *a, *b
+	x.Version, x.UpdatedAt = 0, ""
+	y.Version, y.UpdatedAt = 0, ""
+	return reflect.DeepEqual(x, y)
 }
 
 // AppendDescription adds text to the end of an issue's description, the safe
@@ -859,7 +881,7 @@ func decorateIssue(i *Issue, baseURL string) {
 }
 
 func loadIssue(tx *sql.Tx, key string) (*Issue, error) {
-	issue, err := scanIssue(tx.QueryRow(issueSelect+" WHERE i.key = ?", key))
+	issue, err := scanIssue(tx.QueryRow(issueSelect+" WHERE i.key = ? COLLATE NOCASE", key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("issue %s: %w", key, ErrNotFound)
 	}
@@ -938,7 +960,7 @@ func optionalIssueID(tx *sql.Tx, key string) (any, error) {
 
 func issueIDByKey(tx *sql.Tx, key string) (int64, error) {
 	var id int64
-	err := tx.QueryRow("SELECT id FROM issues WHERE key = ?", key).Scan(&id)
+	err := tx.QueryRow("SELECT id FROM issues WHERE key = ? COLLATE NOCASE", key).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("issue %s: %w", key, ErrInvalidRef)
 	}

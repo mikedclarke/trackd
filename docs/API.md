@@ -28,8 +28,9 @@ creation event), `q`, `updated_since`, `completed_since`, `archived` (`true`
 includes archived issues, `only` restricts to them), `order_by` (`updated`,
 `created`, `priority`), `limit` (default 100, max 500), `offset`, and `view`,
 the name of a saved view whose filter sits under the explicit parameters:
-every field the request leaves empty takes the view's value, so a request can
-narrow or re-sort a view without editing it (`?view=Court&status=Done`). An
+every field the request leaves empty takes the view's value, and `label` and
+`exclude_label` are added to the view's own, so a request can narrow or re-sort
+a view without editing it (`?view=Court&status=Done`, `?view=Court&label=urgent`). An
 unknown parameter is a 400. A filter value that names
 nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
 or a project slug cannot read as "no work": `status`, `status_type`, `project`,

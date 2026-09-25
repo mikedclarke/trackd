@@ -45,6 +45,7 @@ trackd view create "Waiting on me" --label waiting --status Todo --status "In Pr
   --quick "Answered: remove=waiting" --quick "Ship: status=Done, add=released"
 trackd issue list --view "Waiting on me"                  # the view's rows
 trackd issue list --view "Waiting on me" --status Done    # a flag given here overrides the view's
+trackd issue list --view "Waiting on me" --label urgent   # except labels, which narrow it
 trackd view list                                          # every view this token may open
 trackd view show "Waiting on me"
 trackd view update "Waiting on me" --exclude-label ready --clear-order-by --rename Court

@@ -53,6 +53,15 @@ func TestViewLifecycle(t *testing.T) {
 	if f.OrderBy != "priority" || f.Limit != 5 || f.Project != "site" || len(f.Labels) != 1 {
 		t.Errorf("applied filter = %+v", f)
 	}
+	// An explicit label narrows the view rather than replacing its labels;
+	// a repeat of the view's own label is not doubled.
+	f, err = view.Filter.Apply(IssueFilter{Labels: []string{"urgent", "WAITING"}, ExcludeLabels: []string{"parked"}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(strings.Join(f.Labels, ","), "waiting,urgent") || strings.Join(f.ExcludeLabels, ",") != "parked" {
+		t.Errorf("narrowed labels = %v exclude %v", f.Labels, f.ExcludeLabels)
+	}
 	if f.UpdatedSince != "2026-09-14T12:00:00.000Z" {
 		t.Errorf("updated_since = %q", f.UpdatedSince)
 	}

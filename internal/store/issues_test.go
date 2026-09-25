@@ -552,3 +552,43 @@ func TestCreateIssueStampsPhaseTimestamps(t *testing.T) {
 		t.Fatalf("created into In Progress: started=%q completed=%q", active.StartedAt, active.CompletedAt)
 	}
 }
+
+// A patch that leaves the issue as it was is not a write: same version, no
+// event. A key is matched regardless of case.
+func TestUpdateIssueNoChangeAndKeyCase(t *testing.T) {
+	s := openTestStore(t)
+	mustLabel(t, s, "ready", "blocked")
+	issue := mustCreateIssue(t, s, IssueInput{Title: "Same", Status: "Todo", Priority: 2, Labels: []string{"ready"}}, "seo")
+	events, err := s.ListEvents("issue", issue.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := len(events)
+
+	priority := 2
+	status := "todo"
+	got, err := s.UpdateIssue(issue.Key, IssuePatch{Priority: &priority, Status: &status, AddLabels: []string{"ready"}, RemoveLabels: []string{"blocked"}}, "seo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != issue.Version || got.UpdatedAt != issue.UpdatedAt {
+		t.Errorf("no-op patch bumped the issue: version %d -> %d, updated %s -> %s", issue.Version, got.Version, issue.UpdatedAt, got.UpdatedAt)
+	}
+	events, err = s.ListEvents("issue", issue.ID, 0)
+	if err != nil || len(events) != baseline {
+		t.Errorf("no-op patch recorded an event: %d -> %d (%v)", baseline, len(events), err)
+	}
+
+	// The same patch with one real change is a write.
+	priority = 3
+	got, err = s.UpdateIssue(strings.ToLower(issue.Key), IssuePatch{Priority: &priority}, "seo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != issue.Version+1 || got.Priority != 3 || got.Key != issue.Key {
+		t.Errorf("real patch by lowercase key = %+v", got)
+	}
+	if _, err := s.GetIssue(strings.ToLower(issue.Key)); err != nil {
+		t.Errorf("GetIssue by lowercase key: %v", err)
+	}
+}

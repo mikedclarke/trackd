@@ -118,12 +118,14 @@ affair on a phone.
   `trackd setting set label_groups '[["ready","blocked"]]'` and an issue holds at
   most one label from each group, so adding one removes the other and a
   replacement set holding both is rejected. No groups are configured by
-  default. Label, status, project slug and milestone lookups are
+  default. Label, status, project slug, milestone and issue key lookups are
   case-insensitive.
 - **Versions make concurrent updates safe.** Every issue carries a `version` that
   increments on each write. Pass `--expected-version N` (`expected_version` in
   the API) and a write that lost the race fails with a 409 instead of quietly
-  overwriting. Leave it out and the last writer wins, as before.
+  overwriting. Leave it out and the last writer wins, as before. A patch that
+  changes nothing (a label the issue already has, its current priority) is
+  not a write: the version stays and no event is recorded.
 - **Idempotency keys make creates safe to repeat.** Pass `--idempotency-key` when
   creating an issue or a comment; a second create with the same key returns the
   first record rather than making a duplicate.
@@ -227,10 +229,12 @@ button.
 
 ## Data safety
 
-- **One writer.** `serve` takes an exclusive advisory lock on the database file.
-  A second server, or a `token add`, `token revoke`, `setting set`, `import` or
-  `restore` aimed at a database a server is already serving, refuses with
-  `another trackd is running on <path>`. `export`, `backup`, `token list` and
+- **One writer.** `serve` takes an exclusive advisory lock on the database file
+  before it opens the file, so not even its integrity check or a migration runs
+  against a database another trackd holds. A second server, or a `token add`,
+  `token revoke`, `setting set`, `import` or `restore` aimed at a database a
+  server is already serving, refuses with `another trackd is running on <path>`.
+  `export`, `backup`, `token list` and
   `setting list|get` open the file read-only, so they are always safe to run
   against a live database.
 - **A damaged or too-new file is refused.** `serve` runs `PRAGMA quick_check`

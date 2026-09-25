@@ -129,7 +129,7 @@ func TestUIRowActions(t *testing.T) {
 	// the label goes, and the redirect carries a notice back to the view.
 	code, location := post(t, client, action, url.Values{
 		"back": {back + "#" + issue.Key}, "view": {view.Name}, "expected_version": {version()},
-		"body": {"Signed off.\r\nGo."}, "do": {"quick:0"},
+		"body": {"Signed off.\r\nGo."}, "do": {"quick:Answered"},
 	})
 	if code != http.StatusSeeOther || !strings.HasPrefix(location, back) || !strings.Contains(location, "notice=saved") {
 		t.Fatalf("quick action = %d -> %q", code, location)
@@ -202,10 +202,10 @@ func TestUIRowActions(t *testing.T) {
 	if code != http.StatusSeeOther || location != back {
 		t.Errorf("empty post = %d -> %q", code, location)
 	}
-	// A quick action index that no longer exists is refused, not applied.
-	code, location = post(t, client, action, url.Values{"back": {back}, "view": {view.Name}, "expected_version": {version()}, "do": {"quick:9"}})
+	// A quick action name that no longer exists is refused, not applied.
+	code, location = post(t, client, action, url.Values{"back": {back}, "view": {view.Name}, "expected_version": {version()}, "do": {"quick:Archive"}})
 	if !strings.Contains(location, "notice=error") {
-		t.Errorf("bad quick index = %d -> %q", code, location)
+		t.Errorf("bad quick name = %d -> %q", code, location)
 	}
 	// The return path is same-site only.
 	_, location = post(t, client, action, url.Values{"back": {"https://evil.example/"}, "expected_version": {version()}, "body": {"x"}})

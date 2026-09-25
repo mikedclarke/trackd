@@ -6,6 +6,8 @@ package server
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -600,6 +602,17 @@ func classify(err error) (int, string) {
 func isInternal(err error) bool {
 	var se *sqlite.Error
 	if errors.As(err, &se) {
+		return true
+	}
+	// A request that died, a transaction the driver gave up on, or a value
+	// the encoder could not write is the server's fault, not the caller's:
+	// a 400 here would tell an agent not to retry.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, sql.ErrTxDone) || errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	if errors.As(err, new(*json.MarshalerError)) || errors.As(err, new(*json.UnsupportedTypeError)) ||
+		errors.As(err, new(*json.UnsupportedValueError)) {
 		return true
 	}
 	if errors.Is(err, store.ErrIntegrity) || errors.Is(err, store.ErrSchemaNewer) || errors.Is(err, store.ErrLocked) {

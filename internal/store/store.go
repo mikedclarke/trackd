@@ -56,6 +56,10 @@ type migration struct {
 type Options struct {
 	ReadOnly    bool
 	SnapshotDir string
+	// Exclusive takes the advisory lock on <path>.lock before the file is
+	// opened, so nothing (the quick check, a migration) touches a database
+	// another trackd is serving. Close releases it.
+	Exclusive bool
 }
 
 type Store struct {
@@ -63,6 +67,7 @@ type Store struct {
 	path        string
 	readOnly    bool
 	snapshotDir string
+	release     func()
 }
 
 // Open opens (creating if needed) the database at path and applies any pending
@@ -75,43 +80,51 @@ func Open(path string) (*Store, error) { return OpenWith(path, Options{}) }
 func OpenReadOnly(path string) (*Store, error) { return OpenWith(path, Options{ReadOnly: true}) }
 
 func OpenWith(path string, opt Options) (*Store, error) {
+	release := func() {}
+	if opt.Exclusive {
+		var err error
+		if release, err = LockExclusive(path); err != nil {
+			return nil, err
+		}
+	}
 	db, err := sql.Open("sqlite", dataSourceName(path, opt.ReadOnly))
 	if err != nil {
+		release()
 		return nil, err
 	}
 	// A single connection serializes all access: one writer, no busy-retry
 	// logic, and connection pragmas that stay put for the process lifetime.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, path: path, readOnly: opt.ReadOnly, snapshotDir: opt.SnapshotDir}
+	s := &Store{db: db, path: path, readOnly: opt.ReadOnly, snapshotDir: opt.SnapshotDir, release: release}
+	fail := func(err error) (*Store, error) {
+		db.Close()
+		release()
+		return nil, err
+	}
 	// sql.Open is lazy; force the connection so a missing file, a bad DSN or
 	// a rejected pragma is reported here rather than on first use.
 	if err := s.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("open %s: %w", path, wrapBusy(err))
+		return fail(fmt.Errorf("open %s: %w", path, wrapBusy(err)))
 	}
 	migs, err := loadMigrations()
 	if err != nil {
-		db.Close()
-		return nil, err
+		return fail(err)
 	}
 	// A read-write open is about to migrate: check the file is sound and that
 	// this binary is not older than the schema before touching anything.
 	if !opt.ReadOnly {
 		if err := s.QuickCheck(); err != nil {
-			db.Close()
-			return nil, err
+			return fail(err)
 		}
 	}
 	if err := s.checkSchemaVersion(len(migs)); err != nil {
-		db.Close()
-		return nil, err
+		return fail(err)
 	}
 	if opt.ReadOnly {
 		return s, nil
 	}
 	if err := s.applyMigrations(migs); err != nil {
-		db.Close()
-		return nil, err
+		return fail(err)
 	}
 	return s, nil
 }
@@ -143,7 +156,13 @@ func dataSourceName(path string, readOnly bool) string {
 // treats specially, so a path containing them still opens.
 var uriPath = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	err := s.db.Close()
+	if s.release != nil {
+		s.release()
+	}
+	return err
+}
 
 func (s *Store) Path() string { return s.path }
 
@@ -193,10 +212,10 @@ func wrapIntegrity(path string, err error) error {
 	return err
 }
 
-// LockExclusive takes an advisory lock on <path>.lock so a second server, or a
+// LockExclusive takes the advisory lock on <path>.lock so a second server, or a
 // CLI command that would migrate the file, cannot run against a live database.
 // The lock file is not the database and is safe to leave behind.
-func (s *Store) LockExclusive() (func(), error) { return lockFile(s.path + ".lock") }
+func LockExclusive(path string) (func(), error) { return lockFile(path + ".lock") }
 
 func (s *Store) checkSchemaVersion(migrations int) error {
 	var current int

@@ -44,9 +44,13 @@ func ParseWithin(s string) (time.Duration, error) {
 
 // Apply lays the view's filter under an explicit one: every field the caller
 // left empty takes the view's value, so a request can narrow or re-sort a
-// view without editing it. The relative window becomes an absolute
+// view without editing it. Labels and excluded labels are joined rather than
+// replaced, since an issue must carry every label asked for, so an explicit
+// label always narrows the view. The relative window becomes an absolute
 // updated_since against now.
 func (v ViewFilter) Apply(f IssueFilter, now time.Time) (IssueFilter, error) {
+	f.Labels = union(v.Labels, f.Labels)
+	f.ExcludeLabels = union(v.ExcludeLabels, f.ExcludeLabels)
 	if len(f.Statuses) == 0 {
 		f.Statuses = v.Statuses
 	}
@@ -55,12 +59,6 @@ func (v ViewFilter) Apply(f IssueFilter, now time.Time) (IssueFilter, error) {
 	}
 	if f.Project == "" {
 		f.Project = v.Project
-	}
-	if len(f.Labels) == 0 {
-		f.Labels = v.Labels
-	}
-	if len(f.ExcludeLabels) == 0 {
-		f.ExcludeLabels = v.ExcludeLabels
 	}
 	if f.Assignee == "" {
 		f.Assignee = v.Assignee
@@ -88,6 +86,23 @@ func (v ViewFilter) Apply(f IssueFilter, now time.Time) (IssueFilter, error) {
 		f.UpdatedSince = now.UTC().Add(-window).Format(timestampFormat)
 	}
 	return f, nil
+}
+
+// union joins two label lists, keeping order and dropping repeats
+// (case-insensitively, as label lookups are). Two empty lists give nil so an
+// unfiltered request stays unfiltered.
+func union(a, b []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, l := range append(append([]string{}, a...), b...) {
+		k := strings.ToLower(l)
+		if l == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, l)
+	}
+	return out
 }
 
 // Empty reports a filter that names nothing, which as a view would just be

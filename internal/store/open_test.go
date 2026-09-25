@@ -200,32 +200,46 @@ func TestOpenRefusesCorruptDatabase(t *testing.T) {
 }
 
 // S4: the advisory lock is what stops a second server, or a migrating CLI,
-// opening the live database.
+// opening the live database, and it is taken before the file is touched.
 func TestLockExclusive(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "locked.db")
-	s, err := Open(path)
+	s, err := OpenWith(path, Options{Exclusive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	release, err := s.LockExclusive()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := OpenWith(path, Options{Exclusive: true}); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second exclusive open = %v, want ErrLocked", err)
 	}
+	// A plain open still works while the lock is held: reads and the
+	// read-only commands never take it.
 	other, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.Close()
-	if _, err := other.LockExclusive(); !errors.Is(err, ErrLocked) {
-		t.Fatalf("second lock = %v, want ErrLocked", err)
-	}
-	release()
-	second, err := other.LockExclusive()
+	other.Close()
+	// Close releases the lock.
+	s.Close()
+	again, err := OpenWith(path, Options{Exclusive: true})
 	if err != nil {
-		t.Fatalf("lock after release: %v", err)
+		t.Fatalf("exclusive open after close: %v", err)
 	}
-	second()
+	again.Close()
+
+	// The lock comes first: an exclusive open against a locked path fails
+	// before the quick check or a migration can touch the file, so a
+	// database that does not exist yet is not even created.
+	fresh := filepath.Join(t.TempDir(), "fresh.db")
+	release, err := LockExclusive(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := OpenWith(fresh, Options{Exclusive: true}); !errors.Is(err, ErrLocked) {
+		t.Fatalf("exclusive open of a locked path = %v, want ErrLocked", err)
+	}
+	if _, err := os.Stat(fresh); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("locked path was touched: stat = %v", err)
+	}
 }
 
 // S5: foreign_keys is off while a migration runs (otherwise the orphan insert

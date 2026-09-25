@@ -18,7 +18,7 @@ import (
 	"github.com/mikedclarke/trackd/internal/store"
 )
 
-const version = "0.3.1"
+const version = "0.3.2"
 
 func main() {
 	err := run(os.Args[1:])
@@ -124,26 +124,21 @@ func openError(path string, err error) error {
 		return fmt.Errorf("%s failed its integrity check and was not opened; restore the newest verified snapshot into a new file with: trackd restore --db <new path> <snapshot>", path)
 	case errors.Is(err, store.ErrSchemaNewer):
 		return fmt.Errorf("%s was written by a newer trackd; upgrade this binary before opening the file", path)
+	case errors.Is(err, store.ErrLocked):
+		return fmt.Errorf("another trackd is running on %s", path)
 	}
 	return err
 }
 
-// openLocked opens the database read-write and takes the exclusive lock, so a
-// command that writes to the file can never run behind a live server's back.
-func openLocked(path string) (*store.Store, func(), error) {
-	st, err := store.Open(path)
+// openLocked opens the database read-write under the exclusive lock, taken
+// before the file is touched, so a command that writes to the file can never
+// run behind a live server's back. Close releases the lock.
+func openLocked(path string) (*store.Store, error) {
+	st, err := store.OpenWith(path, store.Options{Exclusive: true})
 	if err != nil {
-		return nil, nil, openError(path, err)
+		return nil, openError(path, err)
 	}
-	release, err := st.LockExclusive()
-	if err != nil {
-		st.Close()
-		if errors.Is(err, store.ErrLocked) {
-			return nil, nil, fmt.Errorf("another trackd is running on %s", path)
-		}
-		return nil, nil, err
-	}
-	return st, release, nil
+	return st, nil
 }
 
 func cmdServe(args []string) error {
@@ -159,19 +154,11 @@ func cmdServe(args []string) error {
 	}
 	// The pre-migration snapshot belongs with the other backups when there is
 	// a backup directory: it is the copy you want if a migration goes wrong.
-	st, err := store.OpenWith(*db, store.Options{SnapshotDir: *backupDir})
+	st, err := store.OpenWith(*db, store.Options{SnapshotDir: *backupDir, Exclusive: true})
 	if err != nil {
 		return openError(*db, err)
 	}
 	defer st.Close()
-	release, err := st.LockExclusive()
-	if err != nil {
-		if errors.Is(err, store.ErrLocked) {
-			return fmt.Errorf("another trackd is running on %s", *db)
-		}
-		return err
-	}
-	defer release()
 
 	tokens, err := st.ListTokens()
 	if err != nil {
@@ -234,12 +221,11 @@ func cmdToken(args []string) error {
 		if fs.NArg() != 1 {
 			return usagef("usage: trackd token add [--db <path>] [--role agent|admin] <name>")
 		}
-		st, release, err := openLocked(*db)
+		st, err := openLocked(*db)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
-		defer release()
 		plaintext, err := st.CreateToken(fs.Arg(0), *role)
 		if err != nil {
 			return err
@@ -267,12 +253,11 @@ func cmdToken(args []string) error {
 		if fs.NArg() != 1 {
 			return usagef("usage: trackd token revoke [--db <path>] <name>")
 		}
-		st, release, err := openLocked(*db)
+		st, err := openLocked(*db)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
-		defer release()
 		if err := st.RevokeToken(fs.Arg(0)); err != nil {
 			return err
 		}
@@ -328,16 +313,12 @@ func cmdRestore(args []string) error {
 	// overwrites an existing file, but check the lock first so the reason
 	// given is the real one.
 	if _, err := os.Stat(*db); err == nil {
-		st, openErr := store.OpenReadOnly(*db)
-		if openErr == nil {
-			release, lockErr := st.LockExclusive()
-			st.Close()
-			if lockErr != nil && errors.Is(lockErr, store.ErrLocked) {
-				return fmt.Errorf("another trackd is running on %s", *db)
-			}
-			if release != nil {
-				release()
-			}
+		release, lockErr := store.LockExclusive(*db)
+		if errors.Is(lockErr, store.ErrLocked) {
+			return fmt.Errorf("another trackd is running on %s", *db)
+		}
+		if release != nil {
+			release()
 		}
 	}
 	if err := store.Restore(fs.Arg(0), *db); err != nil {
@@ -392,12 +373,11 @@ func cmdImport(args []string) error {
 		return err
 	}
 	defer f.Close()
-	s, release, err := openLocked(*db)
+	s, err := openLocked(*db)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	defer release()
 	switch format {
 	case "trackd":
 		if err := s.ImportDump(f); err != nil {
@@ -539,12 +519,11 @@ func cmdSetting(args []string) error {
 		if err := store.ValidateSetting(key, value); err != nil {
 			return usagef("%v", err)
 		}
-		st, release, err := openLocked(*db)
+		st, err := openLocked(*db)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
-		defer release()
 		if err := st.UpdateSetting(key, value, *actor); err != nil {
 			return err
 		}
