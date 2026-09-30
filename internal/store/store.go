@@ -173,6 +173,26 @@ func (s *Store) Ping() error {
 	return s.db.QueryRow("SELECT 1").Scan(&n)
 }
 
+// Checkpoint copies the write-ahead log into the database file and truncates
+// the log to zero bytes. SQLite's automatic checkpoints stop the log growing
+// past about 4MB but never shrink the file, so a long-running server would
+// otherwise keep it at that size for good. It moves pages that are already
+// committed and synced; no durability setting changes. A read-only handle has
+// no log of its own to fold in, so it is a no-op there.
+func (s *Store) Checkpoint() error {
+	if s.readOnly {
+		return nil
+	}
+	var busy, logFrames, moved int
+	if err := s.db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &moved); err != nil {
+		return fmt.Errorf("wal checkpoint: %w", wrapBusy(err))
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint: another connection held the log: %w", ErrBusy)
+	}
+	return nil
+}
+
 // QuickCheck runs PRAGMA quick_check, the cheap structural half of
 // integrity_check. Anything but a single "ok" row is ErrIntegrity.
 func (s *Store) QuickCheck() error {

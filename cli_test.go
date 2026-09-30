@@ -4,15 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/mikedclarke/trackd/internal/client"
+	"github.com/mikedclarke/trackd/internal/store"
 )
 
 func TestExitCode(t *testing.T) {
@@ -170,12 +173,16 @@ func TestReadValue(t *testing.T) {
 		t.Errorf("literal value = %q, %v", got, err)
 	}
 
-	withStdin(t, "piped body\n", func() {
-		got, err := readValue("description", "-")
-		if err != nil || got != "piped body" {
-			t.Errorf("stdin value = %q, %v", got, err)
-		}
-	})
+	// Stdin comes back exactly as sent: a caller that writes a body and reads
+	// it back must not see a missing newline and take it for a failed write.
+	for _, sent := range []string{"piped body\n", "piped body", "two lines\nend\n\n", "\tindented\r\n"} {
+		withStdin(t, sent, func() {
+			got, err := readValue("description", "-")
+			if err != nil || got != sent {
+				t.Errorf("stdin %q came back as %q, %v", sent, got, err)
+			}
+		})
+	}
 
 	// An empty pipe is a command that produced nothing, never an instruction
 	// to blank the field.
@@ -867,5 +874,304 @@ func TestIssueListFlatOutput(t *testing.T) {
 	}
 	if err := issueList([]string{"--columns", "bogus"}); !errors.As(err, &usage) {
 		t.Errorf("--columns bogus = %v, want a usage error", err)
+	}
+}
+
+// --json output is strict JSON: a tab, newline or other control character
+// inside a value is escaped (\t, \n, \u0001), never written raw, so a strict
+// parser such as Python's json.loads reads it. The pretty-printer's own
+// newlines sit between tokens, where JSON allows them.
+func TestShowJSONEscapesControlCharacters(t *testing.T) {
+	const description = "line one\n\tindented\r\nbell\x07 and nul\x00 end\n"
+	const comment = "reply\twith a tab\n"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body any
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			body = map[string]any{"comments": []any{map[string]any{"id": 1, "issue_key": "ACME-1", "body": comment}}}
+		case strings.HasSuffix(r.URL.Path, "/relations"):
+			body = map[string]any{"relations": []any{}}
+		default:
+			body = map[string]any{"key": "ACME-1", "title": "tabs\tin a title", "description": description, "labels": []string{}}
+		}
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+	out := captureStdout(t, func() {
+		if err := issueShow([]string{"ACME-1", "--json"}); err != nil {
+			t.Errorf("issue show --json = %v", err)
+		}
+	})
+	for i, c := range []byte(out) {
+		if c < 0x20 && c != '\n' {
+			t.Fatalf("raw control byte %#x at offset %d in %q", c, i, out)
+		}
+	}
+	var got struct {
+		Issue    store.Issue     `json:"issue"`
+		Comments []store.Comment `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("output is not strict JSON: %v (%q)", err, out)
+	}
+	if got.Issue.Description != description || len(got.Comments) != 1 || got.Comments[0].Body != comment {
+		t.Errorf("values did not round-trip: %+v", got)
+	}
+}
+
+// --all follows next_offset until the last page, so a query matching more
+// than one page comes back whole; without it the cut is said, on stderr for
+// --tsv so the records stay clean.
+func TestIssueListAllFollowsPages(t *testing.T) {
+	const total = 5
+	var offsets, orders []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		offsets = append(offsets, q.Get("offset"))
+		orders = append(orders, q.Get("order_by"))
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if limit == 0 {
+			limit = 100
+		}
+		issues := []any{}
+		for i := offset; i < total && i < offset+limit; i++ {
+			issues = append(issues, map[string]any{"key": fmt.Sprintf("ACME-%d", i+1), "status": "Todo", "labels": []string{}})
+		}
+		var next any
+		if len(issues) == limit {
+			next = offset + limit
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"issues": issues, "next_offset": next}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	out := captureStdout(t, func() {
+		if err := issueList([]string{"--all", "--limit", "2", "--json"}); err != nil {
+			t.Fatalf("issue list --all = %v", err)
+		}
+	})
+	var env struct {
+		Issues     []store.Issue `json:"issues"`
+		NextOffset *int          `json:"next_offset"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("output is not JSON: %v (%q)", err, out)
+	}
+	if len(env.Issues) != total || env.Issues[total-1].Key != "ACME-5" || env.NextOffset != nil {
+		t.Errorf("--all = %d issues, next %v", len(env.Issues), env.NextOffset)
+	}
+	if strings.Join(offsets, ",") != ",2,4" {
+		t.Errorf("--all asked for offsets %q, want \",2,4\"", offsets)
+	}
+	// The default newest-updated order shifts under concurrent writes, so
+	// --all walks oldest created first unless told otherwise.
+	if strings.Join(orders, ",") != "created,created,created" {
+		t.Errorf("--all sent order_by %q, want created on every page", orders)
+	}
+	orders = nil
+	captureStdout(t, func() {
+		if err := issueList([]string{"--all", "--order-by", "priority", "--limit", "10", "--json"}); err != nil {
+			t.Fatalf("issue list --all --order-by = %v", err)
+		}
+	})
+	if strings.Join(orders, ",") != "priority" {
+		t.Errorf("--all --order-by priority sent order_by %q, want priority kept", orders)
+	}
+	orders = nil
+
+	out = captureStdout(t, func() {
+		if err := issueList([]string{"--limit", "2"}); err != nil {
+			t.Fatalf("issue list = %v", err)
+		}
+	})
+	if !strings.Contains(out, "more results: --offset 2") || strings.Contains(out, "ACME-3") {
+		t.Errorf("one page = %q, want two rows and the more line", out)
+	}
+	if strings.Join(orders, ",") != "" {
+		t.Errorf("one page sent order_by %q, want the server default", orders)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	out = captureStdout(t, func() {
+		if err := issueList([]string{"--limit", "2", "--tsv"}); err != nil {
+			t.Errorf("issue list --tsv = %v", err)
+		}
+	})
+	os.Stderr = saved
+	w.Close()
+	stderr, _ := io.ReadAll(r)
+	r.Close()
+	if strings.Contains(out, "more") || len(strings.Split(strings.TrimSpace(out), "\n")) != 2 {
+		t.Errorf("tsv stdout = %q, want two clean records", out)
+	}
+	if !strings.Contains(string(stderr), "more results: --offset 2") {
+		t.Errorf("tsv stderr = %q, want the more line", stderr)
+	}
+}
+
+// Several keys on issue update are one batch request. Each item is reported,
+// a refused one sets the exit code, and --json prints one document.
+func TestIssueUpdateManyKeys(t *testing.T) {
+	var paths []string
+	var sent struct {
+		Updates []map[string]any `json:"updates"`
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/v1/issues" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"key": "ACME-1", "status": "Done", "version": 1, "labels": []string{}})
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Errorf("decoding batch: %v", err)
+		}
+		results := []any{
+			map[string]any{"key": "ACME-1", "ok": true, "issue": map[string]any{"key": "ACME-1", "status": "Done", "version": 3, "labels": []string{}}},
+			map[string]any{"key": "ACME-2", "ok": false, "error": "issue ACME-2 is at version 4, not 3: version conflict", "code": "version_conflict", "status": 409},
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"results": results}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = issueUpdate([]string{"ACME-1", "--status", "Done", "ACME-2", "--add-label", "ready"})
+	})
+	if len(paths) != 1 || paths[0] != "PATCH /api/v1/issues" {
+		t.Fatalf("requests = %v, want one batch PATCH", paths)
+	}
+	if len(sent.Updates) != 2 || sent.Updates[0]["key"] != "ACME-1" || sent.Updates[1]["key"] != "ACME-2" ||
+		sent.Updates[1]["status"] != "Done" || sent.Updates[1]["add_labels"] == nil {
+		t.Errorf("batch body = %+v", sent.Updates)
+	}
+	if !strings.Contains(out, "ACME-1 updated (Done, version 3)") || !strings.Contains(out, "ACME-2 failed:") {
+		t.Errorf("report = %q", out)
+	}
+	var batch *batchError
+	if !errors.As(runErr, &batch) || exitCode(runErr) != 5 || !strings.Contains(runErr.Error(), "1 of 2 updates failed") {
+		t.Errorf("error = %v (exit %d), want a batch error exiting 5", runErr, exitCode(runErr))
+	}
+
+	out = captureStdout(t, func() {
+		runErr = issueUpdate([]string{"ACME-1", "ACME-2", "--status", "Done", "--json"})
+	})
+	var env struct {
+		Results []client.IssueBatchResult `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil || len(env.Results) != 2 || env.Results[1].Code != "version_conflict" {
+		t.Errorf("--json = %q (%v), want one results document", out, err)
+	}
+
+	// A single key keeps the plain PATCH.
+	paths = nil
+	captureStdout(t, func() {
+		if err := issueUpdate([]string{"ACME-1", "--status", "Done"}); err != nil {
+			t.Errorf("single update = %v", err)
+		}
+	})
+	if len(paths) != 1 || paths[0] != "PATCH /api/v1/issues/ACME-1" {
+		t.Errorf("single-key requests = %v", paths)
+	}
+
+	paths = nil
+	for _, args := range [][]string{
+		{"ACME-1", "ACME-2", "--append", "note"},
+		{"ACME-1", "ACME-2", "--status", "Done", "--expected-version", "3"},
+		{"ACME-1", "ACME-2"},
+		{"--status", "Done"},
+	} {
+		var usage *usageError
+		if err := issueUpdate(args); !errors.As(err, &usage) {
+			t.Errorf("issue update %v = %v, want a usage error", args, err)
+		}
+	}
+	if len(paths) != 0 {
+		t.Errorf("refused commands still sent %v", paths)
+	}
+}
+
+// An unquoted flag value on issue update used to be refused as an extra
+// positional. With several keys allowed, a bare word that is not shaped like
+// a key is still refused, before anything is sent, so "--title Fix the bug"
+// cannot retitle TSK-1 to "Fix" and fail on "the" and "bug".
+func TestIssueUpdateRefusesBareWordsThatAreNotKeys(t *testing.T) {
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+
+	for _, args := range [][]string{
+		{"TSK-1", "--title", "Fix", "the", "bug"},
+		{"--title", "Fix", "TSK-1", "bug"},
+		{"TSK-1", "--add-label", "a", "b"},
+	} {
+		err := issueUpdate(args)
+		var usage *usageError
+		if !errors.As(err, &usage) || exitCode(err) != 2 {
+			t.Errorf("issue update %v = %v (exit %d), want a usage error exiting 2", args, err, exitCode(err))
+		} else if !strings.Contains(err.Error(), "is not an issue key") {
+			t.Errorf("issue update %v message = %q", args, err)
+		}
+	}
+	if len(paths) != 0 {
+		t.Errorf("refused commands still sent %v; the title must stay unchanged", paths)
+	}
+
+	// Keys in any case, with digits in the prefix, are still a batch.
+	captureStdout(t, func() {
+		_ = issueUpdate([]string{"tsk-1", "AB2-10", "--status", "Done"})
+	})
+	if len(paths) != 1 || paths[0] != "PATCH /api/v1/issues" {
+		t.Errorf("key-shaped words sent %v, want one batch PATCH", paths)
+	}
+}
+
+// --key on events narrows the feed to those issues, one request for several
+// histories.
+func TestEventsKeyFlag(t *testing.T) {
+	var got []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()["key"]
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"events": []any{}, "next_after_id": nil}); err != nil {
+			t.Errorf("writing response: %v", err)
+		}
+	}))
+	defer ts.Close()
+	t.Setenv("TRACKD_URL", ts.URL)
+	t.Setenv("TRACKD_TOKEN", "td_test")
+	captureStdout(t, func() {
+		if err := cmdEvents([]string{"--key", "ACME-1", "--key", "ACME-2", "--json"}); err != nil {
+			t.Errorf("events --key = %v", err)
+		}
+	})
+	if strings.Join(got, ",") != "ACME-1,ACME-2" {
+		t.Errorf("events --key sent key=%v", got)
 	}
 }

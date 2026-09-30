@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -163,12 +164,18 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err)
 		return
 	}
-	resp := issueListResponse{Issues: issues}
-	if len(issues) == clamp(limit, defaultIssueLimit, maxIssueLimit) {
-		next := offset + len(issues)
-		resp.NextOffset = &next
+	writeJSON(w, http.StatusOK, issueListResponse{Issues: issues, NextOffset: nextOffset(filter, len(issues))})
+}
+
+// nextOffset is the offset of the page after one that returned n issues, or
+// nil when that page was short and so the last. A full page always carries it,
+// so a result cut at the limit is never silent.
+func nextOffset(f store.IssueFilter, n int) *int {
+	if n < clamp(f.Limit, defaultIssueLimit, maxIssueLimit) {
+		return nil
 	}
-	writeJSON(w, http.StatusOK, resp)
+	next := f.Offset + n
+	return &next
 }
 
 type issueCreateReq struct {
@@ -263,17 +270,28 @@ func (s *Server) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	issue, err := s.patchIssue(r, r.PathValue("key"), req)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, issue)
+}
+
+var errEmptyPatch = errors.New("empty patch: no fields to update")
+
+// patchIssue is one issue update, the whole of PATCH /issues/{key} and one
+// item of a batch: the same checks, the same store method, one audit event.
+func (s *Server) patchIssue(r *http.Request, key string, req issuePatchReq) (*store.Issue, error) {
 	// The CLI's --clear-description is this same field with an empty
 	// description beside it, so one check covers both ways of losing the text.
 	if req.ReplaceDescription && tokenRole(r) != roleAdmin {
-		writeStoreError(w, r, errAdminOnly)
-		return
+		return nil, errAdminOnly
 	}
 	if req.empty() {
-		writeValidation(w, "empty patch: no fields to update")
-		return
+		return nil, errEmptyPatch
 	}
-	issue, err := s.store.UpdateIssue(r.PathValue("key"), store.IssuePatch{
+	return s.store.UpdateIssue(key, store.IssuePatch{
 		Title:              req.Title,
 		Description:        req.Description,
 		ReplaceDescription: req.ReplaceDescription,
@@ -290,11 +308,74 @@ func (s *Server) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
 		ExpectedVersion:    req.ExpectedVersion,
 		Archived:           req.Archived,
 	}, actor(r, req.Actor))
-	if err != nil {
-		writeStoreError(w, r, err)
+}
+
+// maxBatchUpdates bounds one batch request, so a single call cannot hold the
+// one database connection for long.
+const maxBatchUpdates = 100
+
+// issueBatchItem is one update in a batch: the issue key beside the same
+// fields a PATCH /issues/{key} body takes.
+type issueBatchItem struct {
+	Key string `json:"key"`
+	issuePatchReq
+}
+
+type issueBatchReq struct {
+	Updates []issueBatchItem `json:"updates"`
+}
+
+// issueBatchResult reports one item, in request order: the updated issue, or
+// the error body and HTTP status that item would have had on its own.
+type issueBatchResult struct {
+	Key    string       `json:"key"`
+	OK     bool         `json:"ok"`
+	Issue  *store.Issue `json:"issue,omitempty"`
+	Error  string       `json:"error,omitempty"`
+	Code   string       `json:"code,omitempty"`
+	Status int          `json:"status,omitempty"`
+}
+
+type issueBatchResponse struct {
+	Results []issueBatchResult `json:"results"`
+}
+
+// handleBatchPatchIssues applies several issue updates in one request. Each
+// item runs exactly as its own PATCH would, in its own transaction with its
+// own audit event, and one item failing does not stop or undo the others: the
+// answer is 200 with a result per item, and only a malformed request as a
+// whole is an error.
+func (s *Server) handleBatchPatchIssues(w http.ResponseWriter, r *http.Request) {
+	var req issueBatchReq
+	if err := decodeBody(w, r, &req); err != nil {
+		writeValidation(w, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, issue)
+	if len(req.Updates) == 0 {
+		writeValidation(w, "updates: at least one update is required")
+		return
+	}
+	if len(req.Updates) > maxBatchUpdates {
+		writeValidation(w, fmt.Sprintf("updates: at most %d per request, got %d", maxBatchUpdates, len(req.Updates)))
+		return
+	}
+	results := make([]issueBatchResult, 0, len(req.Updates))
+	for _, item := range req.Updates {
+		result := issueBatchResult{Key: item.Key}
+		var issue *store.Issue
+		err := errors.New("key is required")
+		if item.Key != "" {
+			issue, err = s.patchIssue(r, item.Key, item.issuePatchReq)
+		}
+		if err != nil {
+			status, body := storeErrorBody(r, err)
+			result.Status, result.Error, result.Code = status, body.Error, body.Code
+		} else {
+			result.OK, result.Issue = true, issue
+		}
+		results = append(results, result)
+	}
+	writeJSON(w, http.StatusOK, issueBatchResponse{Results: results})
 }
 
 type descriptionAppendReq struct {
@@ -458,7 +539,7 @@ type eventListResponse struct {
 	NextAfterID *int64 `json:"next_after_id"`
 }
 
-var eventListParams = []string{"since", "after_id", "entity", "limit"}
+var eventListParams = []string{"since", "after_id", "entity", "key", "limit"}
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -482,10 +563,11 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, err := s.store.ListAllEvents(store.EventFilter{
-		Since:   since,
-		AfterID: afterID,
-		Entity:  q.Get("entity"),
-		Limit:   limit,
+		Since:     since,
+		AfterID:   afterID,
+		Entity:    q.Get("entity"),
+		IssueKeys: q["key"],
+		Limit:     limit,
 	})
 	if err != nil {
 		writeStoreError(w, r, err)

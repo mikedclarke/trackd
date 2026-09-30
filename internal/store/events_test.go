@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -71,5 +73,60 @@ func TestListAllEvents(t *testing.T) {
 	perMilestone, err := s.ListEvents("milestone", milestone.ID, 0)
 	if err != nil || len(perMilestone) != 1 || perMilestone[0].EntityKey != "rebuild/Launch" {
 		t.Fatalf("per-milestone feed = %+v, %v", perMilestone, err)
+	}
+}
+
+// Issue keys narrow the global feed to those issues' events, oldest first with
+// the same cursor, so one request reads several issues' histories.
+func TestListAllEventsByIssueKeys(t *testing.T) {
+	s := openTestStore(t)
+	a := mustCreateIssue(t, s, IssueInput{Title: "alpha"}, "pm")
+	b := mustCreateIssue(t, s, IssueInput{Title: "beta"}, "pm")
+	mustCreateIssue(t, s, IssueInput{Title: "gamma"}, "pm")
+	if _, err := s.UpdateIssue(a.Key, IssuePatch{Status: strptr("Todo")}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateProject(ProjectInput{Name: "Noise"}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListAllEvents(EventFilter{IssueKeys: []string{a.Key, strings.ToLower(b.Key)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	for _, e := range got {
+		seen = append(seen, e.EntityKey+" "+e.Action)
+	}
+	want := []string{a.Key + " issue.created", b.Key + " issue.created", a.Key + " issue.updated"}
+	if strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Fatalf("keyed feed = %v, want %v", seen, want)
+	}
+
+	// The cursor and the limit page through a keyed feed like the plain one.
+	page, err := s.ListAllEvents(EventFilter{IssueKeys: []string{a.Key, b.Key}, Limit: 2})
+	if err != nil || len(page) != 2 {
+		t.Fatalf("first keyed page = %+v, %v", page, err)
+	}
+	rest, err := s.ListAllEvents(EventFilter{IssueKeys: []string{a.Key, b.Key}, AfterID: page[1].ID})
+	if err != nil || len(rest) != 1 || rest[0].Action != "issue.updated" {
+		t.Fatalf("keyed page after cursor = %+v, %v", rest, err)
+	}
+	if both, err := s.ListAllEvents(EventFilter{IssueKeys: []string{a.Key}, Entity: "issue"}); err != nil || len(both) != 2 {
+		t.Errorf("keys with entity issue = %+v, %v", both, err)
+	}
+
+	if _, err := s.ListAllEvents(EventFilter{IssueKeys: []string{a.Key, "TSK-999"}}); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("unknown key = %v, want ErrInvalidRef", err)
+	}
+	if _, err := s.ListAllEvents(EventFilter{IssueKeys: []string{a.Key}, Entity: "project"}); err == nil {
+		t.Error("keys with entity project were accepted")
+	}
+	tooMany := make([]string, MaxEventIssueKeys+1)
+	for i := range tooMany {
+		tooMany[i] = a.Key
+	}
+	if _, err := s.ListAllEvents(EventFilter{IssueKeys: tooMany}); err == nil {
+		t.Error("more than MaxEventIssueKeys keys were accepted")
 	}
 }

@@ -304,6 +304,89 @@ func (s *Store) AppendDescription(key, text, actor string) (*Issue, error) {
 }
 
 func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
+	where, args, err := issueWhere(f)
+	if err != nil {
+		return nil, err
+	}
+	order, err := issueOrder(f.OrderBy)
+	if err != nil {
+		return nil, err
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	args = append(args, limit, f.Offset)
+
+	out := []Issue{}
+	err = s.tx(func(tx *sql.Tx) error {
+		if err := validateIssueFilter(tx, f); err != nil {
+			return err
+		}
+		base, err := settingTx(tx, "base_url")
+		if err != nil {
+			return err
+		}
+		rows, err := tx.Query(issueSelect+" WHERE "+where+
+			" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			issue, err := scanIssue(rows)
+			if err != nil {
+				return err
+			}
+			decorateIssue(issue, base)
+			out = append(out, *issue)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		ids := make([]int64, len(out))
+		for i := range out {
+			ids[i] = out[i].ID
+		}
+		labels, err := issueLabelsFor(tx, ids)
+		if err != nil {
+			return err
+		}
+		for i := range out {
+			if names, ok := labels[out[i].ID]; ok {
+				out[i].Labels = names
+			} else {
+				out[i].Labels = []string{}
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// CountIssues is how many issues the filter matches in all, ignoring its limit
+// and offset, so a caller showing one capped page can say how much is left.
+func (s *Store) CountIssues(f IssueFilter) (int, error) {
+	where, args, err := issueWhere(f)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.tx(func(tx *sql.Tx) error {
+		if err := validateIssueFilter(tx, f); err != nil {
+			return err
+		}
+		return tx.QueryRow("SELECT COUNT(*) FROM ("+issueSelect+" WHERE "+where+")", args...).Scan(&n)
+	})
+	return n, err
+}
+
+// issueWhere turns a filter into the WHERE clause over issueSelect's aliases
+// and its arguments. The list and the count share it, so they cannot drift.
+func issueWhere(f IssueFilter) (string, []any, error) {
 	where := []string{"1=1"}
 	var args []any
 	switch strings.ToLower(f.Archived) {
@@ -313,7 +396,7 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 	case "only":
 		where = append(where, "i.archived_at IS NOT NULL")
 	default:
-		return nil, fmt.Errorf("unknown archived filter %q, want \"\", \"true\" or \"only\"", f.Archived)
+		return "", nil, fmt.Errorf("unknown archived filter %q, want \"\", \"true\" or \"only\"", f.Archived)
 	}
 	if len(f.Statuses) > 0 {
 		where = append(where, "s.name COLLATE NOCASE IN ("+placeholders(len(f.Statuses))+")")
@@ -372,63 +455,7 @@ func (s *Store) ListIssues(f IssueFilter) ([]Issue, error) {
 	if f.CompletedSince != "" {
 		where, args = append(where, "i.completed_at >= ?"), append(args, f.CompletedSince)
 	}
-	order, err := issueOrder(f.OrderBy)
-	if err != nil {
-		return nil, err
-	}
-	limit := f.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 500 {
-		limit = 500
-	}
-	args = append(args, limit, f.Offset)
-
-	out := []Issue{}
-	err = s.tx(func(tx *sql.Tx) error {
-		if err := validateIssueFilter(tx, f); err != nil {
-			return err
-		}
-		base, err := settingTx(tx, "base_url")
-		if err != nil {
-			return err
-		}
-		rows, err := tx.Query(issueSelect+" WHERE "+strings.Join(where, " AND ")+
-			" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			issue, err := scanIssue(rows)
-			if err != nil {
-				return err
-			}
-			decorateIssue(issue, base)
-			out = append(out, *issue)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		ids := make([]int64, len(out))
-		for i := range out {
-			ids[i] = out[i].ID
-		}
-		labels, err := issueLabelsFor(tx, ids)
-		if err != nil {
-			return err
-		}
-		for i := range out {
-			if names, ok := labels[out[i].ID]; ok {
-				out[i].Labels = names
-			} else {
-				out[i].Labels = []string{}
-			}
-		}
-		return nil
-	})
-	return out, err
+	return strings.Join(where, " AND "), args, nil
 }
 
 // statusTypes are the workflow phases a status may carry, matching the CHECK

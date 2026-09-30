@@ -23,7 +23,7 @@
     </select>
   </label>
   <button type="submit">apply</button>
-  <span class="filter-count">{{.Count}} issues</span>
+  <span class="filter-count">{{if gt .Total .Count}}showing {{.Count}} of {{.Total}} issues; filter to see the rest{{else}}{{.Count}} issues{{end}}</span>
 </form>
 
 {{if .Count}}

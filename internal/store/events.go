@@ -89,6 +89,10 @@ func (s *Store) ListEvents(entity string, entityID int64, limit int) ([]Event, e
 	return out, rows.Err()
 }
 
+// MaxEventIssueKeys bounds EventFilter.IssueKeys: enough for a session's
+// working set, small enough that the IN list stays a cheap query.
+const MaxEventIssueKeys = 100
+
 // ListAllEvents is the workspace-wide activity feed. It runs oldest first so a
 // consumer can page forward with after_id and never miss a row.
 func (s *Store) ListAllEvents(f EventFilter) ([]Event, error) {
@@ -110,6 +114,14 @@ func (s *Store) ListAllEvents(f EventFilter) ([]Event, error) {
 		}
 		where, args = append(where, "e.entity = ?"), append(args, f.Entity)
 	}
+	if len(f.IssueKeys) > 0 {
+		if f.Entity != "" && !strings.EqualFold(f.Entity, "issue") {
+			return nil, fmt.Errorf("issue keys narrow the issue events; entity %q cannot be combined with them", f.Entity)
+		}
+		if len(f.IssueKeys) > MaxEventIssueKeys {
+			return nil, fmt.Errorf("at most %d issue keys per request, got %d", MaxEventIssueKeys, len(f.IssueKeys))
+		}
+	}
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 100
@@ -117,22 +129,40 @@ func (s *Store) ListAllEvents(f EventFilter) ([]Event, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	args = append(args, limit)
-	rows, err := s.db.Query(
-		eventSelect+" WHERE "+strings.Join(where, " AND ")+" ORDER BY e.id ASC LIMIT ?",
-		args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	out := []Event{}
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
+	err := s.tx(func(tx *sql.Tx) error {
+		where, args := where, args
+		if len(f.IssueKeys) > 0 {
+			// Each key resolves first, like any other filter value that names
+			// something: a typo is an error, not a quietly shorter history.
+			ids := make([]any, 0, len(f.IssueKeys))
+			for _, key := range f.IssueKeys {
+				id, err := issueIDByKey(tx, key)
+				if err != nil {
+					return err
+				}
+				ids = append(ids, id)
+			}
+			where = append(where, "e.entity = 'issue'", "e.entity_id IN ("+placeholders(len(ids))+")")
+			args = append(args, ids...)
 		}
-		out = append(out, *e)
-	}
-	return out, rows.Err()
+		args = append(args, limit)
+		rows, err := tx.Query(
+			eventSelect+" WHERE "+strings.Join(where, " AND ")+" ORDER BY e.id ASC LIMIT ?",
+			args...,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			e, err := scanEvent(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, *e)
+		}
+		return rows.Err()
+	})
+	return out, err
 }

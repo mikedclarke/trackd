@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /api/v1/issues", s.handleListIssues)
 	api.HandleFunc("POST /api/v1/issues", s.handleCreateIssue)
+	api.HandleFunc("PATCH /api/v1/issues", s.handleBatchPatchIssues)
 	api.HandleFunc("GET /api/v1/issues/{key}", s.handleGetIssue)
 	api.HandleFunc("PATCH /api/v1/issues/{key}", s.handlePatchIssue)
 	api.HandleFunc("POST /api/v1/issues/{key}/description", s.handleAppendDescription)
@@ -398,6 +399,11 @@ func (s *Server) RunBackups(ctx context.Context, cfg BackupConfig) {
 				log.Printf("backup prune failed: %v", err)
 			}
 		}
+		// The snapshot is safe on disk, so this is the quiet moment to fold
+		// the write-ahead log back in and shrink it to nothing.
+		if err := s.store.Checkpoint(); err != nil {
+			log.Printf("%v", err)
+		}
 	}
 	// A service that restarts often must not fill the backup directory with
 	// near-identical snapshots, so a recent one stands in for the startup run.
@@ -625,17 +631,23 @@ func isInternal(err error) bool {
 }
 
 func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
-	status, code := classify(err)
+	status, body := storeErrorBody(r, err)
 	if status == http.StatusServiceUnavailable {
 		// The CLI retries a busy database rather than reporting a failure.
 		w.Header().Set("Retry-After", "1")
 	}
+	writeJSON(w, status, body)
+}
+
+// storeErrorBody is the status and error body a failure answers with. An
+// internal failure is logged here and reported without its detail.
+func storeErrorBody(r *http.Request, err error) (int, errorBody) {
+	status, code := classify(err)
 	if status == http.StatusInternalServerError {
 		log.Printf("%s %s: internal error: %v", r.Method, r.URL.Path, err)
-		writeError(w, status, code, "internal error")
-		return
+		return status, errorBody{Error: "internal error", Code: code}
 	}
-	writeError(w, status, code, err.Error())
+	return status, errorBody{Error: err.Error(), Code: code}
 }
 
 // decodeBody strictly decodes a JSON request body, rejecting unknown fields so

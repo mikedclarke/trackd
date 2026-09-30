@@ -211,6 +211,42 @@ func (c *Client) UpdateIssue(key string, p IssuePatch) (*store.Issue, error) {
 	return &issue, nil
 }
 
+// IssueBatchUpdate is one item of a batch update: an issue key and its patch.
+type IssueBatchUpdate struct {
+	Key   string
+	Patch IssuePatch
+}
+
+// IssueBatchResult is the server's answer for one item, in request order: the
+// updated issue, or the error body and HTTP status that item got.
+type IssueBatchResult struct {
+	Key    string       `json:"key"`
+	OK     bool         `json:"ok"`
+	Issue  *store.Issue `json:"issue,omitempty"`
+	Error  string       `json:"error,omitempty"`
+	Code   string       `json:"code,omitempty"`
+	Status int          `json:"status,omitempty"`
+}
+
+// UpdateIssues sends several issue updates in one request. Each is applied on
+// its own, so the error return covers only the request as a whole; a refused
+// item is a result with OK false.
+func (c *Client) UpdateIssues(updates []IssueBatchUpdate) ([]IssueBatchResult, error) {
+	items := make([]map[string]any, len(updates))
+	for i, u := range updates {
+		item := u.Patch.body()
+		item["key"] = u.Key
+		items[i] = item
+	}
+	var env struct {
+		Results []IssueBatchResult `json:"results"`
+	}
+	if err := c.Do("PATCH", "/api/v1/issues", nil, map[string]any{"updates": items}, &env); err != nil {
+		return nil, err
+	}
+	return env.Results, nil
+}
+
 // AppendDescription adds text to the end of an issue description. It is the
 // only way to add to a description that is already written: a plain patch is
 // refused by the server.
@@ -307,16 +343,20 @@ func (c *Client) SaveRelation(key, related, typ string, remove bool, actor strin
 // EventQuery is the filter set of the activity feed. AfterID is the cursor: it
 // is the id of the last event already seen.
 type EventQuery struct {
-	Since   string
-	AfterID int64
-	Entity  string
-	Limit   int
+	Since     string
+	AfterID   int64
+	Entity    string
+	IssueKeys []string
+	Limit     int
 }
 
 func (q EventQuery) values() url.Values {
 	v := url.Values{}
 	setIf(v, "since", q.Since)
 	setIf(v, "entity", q.Entity)
+	for _, k := range q.IssueKeys {
+		v.Add("key", k)
+	}
 	if q.AfterID > 0 {
 		v.Set("after_id", strconv.FormatInt(q.AfterID, 10))
 	}

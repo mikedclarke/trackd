@@ -234,6 +234,15 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The board reads one capped page. When the cap is hit, say how many
+	// there are in all rather than let the rest vanish without a word.
+	var total int
+	if len(issues) == maxIssueLimit {
+		if total, err = s.store.CountIssues(filter); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	statuses, err := s.store.ListStatuses()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -300,6 +309,7 @@ func (s *Server) uiBoard(w http.ResponseWriter, r *http.Request) {
 		"Label":     label,
 		"Assignee":  assignee,
 		"Count":     len(issues),
+		"Total":     total,
 	})
 }
 

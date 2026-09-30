@@ -14,7 +14,11 @@ a token file named by `$TRACKD_TOKEN_FILE` (tried after `$TRACKD_TOKEN`).
 Every command takes `--json` for machine-readable output, on failure too: the
 error object goes to stdout and the human line to stderr. Every list command's
 `--json` is an envelope keyed by the type (`{"projects": [...]}`,
-`{"issues": [...]}`, ...), the same shape the REST API returns. Flags may come
+`{"issues": [...]}`, ...), the same shape the REST API returns. The JSON is
+strict: a tab or newline inside a value is written as `\t` or `\n`. Pipe it
+straight into the parser, or print a captured copy with `printf '%s\n'`;
+zsh's builtin `echo` turns those escapes back into raw control characters,
+which a strict parser then rejects. Flags may come
 before or after the positional key, so `trackd issue show --json TSK-1` works.
 `trackd <command> --help` (and `-h`) prints the flags and exits 0.
 
@@ -29,6 +33,26 @@ and `--columns <cols>` or `--tsv` for a flat listing of only the named columns
 table or JSON. `--priority` on `issue create` and `issue update` accepts a word
 (`none|urgent|high|medium|low`) as well as `0-4`, and `--milestone` accepts a
 milestone id as well as a name.
+
+`issue list` shows one page (`--limit`, default 100, max 500) and says
+`more results: --offset N (or --all)` when there is another; `--tsv` says it on
+stderr so the records stay clean, and `--json` carries it as `next_offset`.
+`--all` follows the pages to the end and prints every result. Without
+`--order-by` it sorts oldest created first (not the usual most recently
+updated), so an issue updated while the pages are read is neither skipped nor
+repeated.
+
+`issue update` takes several keys (`trackd issue update TSK-1 TSK-2 TSK-3
+--status Done --add-label shipped`) and sends them as one batch request. Each
+issue is updated on its own, with its own audit event; a refused one does not
+stop the others. It prints a line per key (`--json`: `{"results": [...]}`) and
+exits with the first refusal's code. An item refused as busy can be re-run on
+its own; the others are already applied. `--append` and `--expected-version`
+take one key. Every bare word must be shaped like an issue key, so an unquoted
+flag value (`--title Fix the bug`) is a usage error and nothing is sent.
+
+`events --key <key>` (repeatable, up to 100) reads those issues' events in
+one request, oldest first; page on with `--after-id`.
 
 ## Views
 
@@ -94,7 +118,8 @@ Two rules protect a field from an empty shell variable:
   `--clear-description`, `--clear-labels`, `--clear-project`, `--clear-parent`,
   `--clear-assignee`, `--clear-milestone`, `--clear-due`.
 - `--description -`, `--body -` and `--text -` read stdin, and fail when stdin is
-  empty rather than writing nothing over something.
+  empty rather than writing nothing over something. Stdin is kept byte for
+  byte, trailing newline included.
 - `--text` and `--body` are interchangeable on the body-bearing commands:
   `issue append`, `issue comment` and `comment edit` all accept either name.
   Passing both at once is a usage error.

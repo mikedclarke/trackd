@@ -183,7 +183,9 @@ button.
   database connection and are bounded by `--backup-timeout`, so a slow or hung
   backup destination can never block the API; failures show up in `/healthz`
   alongside the last good snapshot. The startup snapshot is skipped when a recent
-  one already exists.
+  one already exists. After each snapshot, and on a clean shutdown, the
+  write-ahead log is checkpointed and truncated, so the `-wal` file does not
+  keep its high-water size.
 - `trackd backup` / `trackd restore <snapshot>` for manual operation. Restore
   refuses to overwrite an existing database, and refuses a destination that still
   has `-wal` or `-shm` sidecars beside it, because those hold writes the snapshot

@@ -7,6 +7,52 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-30
+
+### Added
+
+- Batch issue update: `PATCH /api/v1/issues` takes `{"updates": [{"key": ...,
+  <the fields of a single PATCH>}, ...]}`, up to 100 items, and answers 200
+  with `{"results": [...]}`, one per item in request order: `ok` with the
+  updated `issue`, or the `error`, `code` and HTTP `status` that item would
+  have got on its own. Each item goes through the single update's own path, in
+  its own transaction with its own audit event, and the same rules apply
+  (append-only descriptions, admin-only `replace_description`,
+  `expected_version`). A refused item does not stop or undo the others.
+  `trackd issue update KEY [KEY...]` sends one batch for several keys, prints a
+  line per key and exits with the first refusal's code.
+- `trackd issue list --all` follows `next_offset` to the last page, so a query
+  matching more than one page comes back whole. Without `--order-by` it walks
+  oldest created first, so an issue updated mid-walk is neither skipped nor
+  repeated.
+- `GET /api/v1/events?key=KEY` (repeatable, up to 100), `trackd events --key`
+  and `keys` on the MCP `list_activity` tool narrow the feed to those issues,
+  so several issues' histories come back in one request with the usual
+  `after_id` cursor. An unknown key is a 422 `invalid_ref`.
+- The MCP `list_issues` result carries `next_offset` like the REST envelope.
+- The web board says "showing 500 of N issues" when a filter matches more than
+  the 500 it shows.
+- The server checkpoints the write-ahead log (`PRAGMA wal_checkpoint(TRUNCATE)`)
+  after each scheduled backup and on a clean shutdown, so the `-wal` file no
+  longer sits at its high-water size for good.
+
+### Changed
+
+- `--description -`, `--body -`, `--text -` and `--append -` keep stdin byte
+  for byte, trailing newline included, so a body read back compares equal to
+  the one written. Bodies piped in now keep their final newline; a script that
+  relied on it being trimmed should strip it itself. Empty or whitespace-only
+  stdin is still refused.
+- Extra bare words after `trackd issue update KEY` are now read as more keys
+  (a batch) rather than refused. A bare word that is not shaped like an issue
+  key is still a usage error, before anything is sent, so an unquoted
+  `--title Fix the bug` changes nothing; quote a flag value that has spaces.
+
+### Fixed
+
+- `trackd issue list --tsv` says `more results` on stderr when the page was
+  full, instead of stopping at the limit without a word.
+
 ## [0.3.2] - 2026-09-25
 
 ### Fixed

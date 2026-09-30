@@ -533,6 +533,24 @@ func TestListIssuesLimits(t *testing.T) {
 	if empty == nil || len(empty) != 0 {
 		t.Errorf("empty page = %v, want a non-nil empty slice", empty)
 	}
+
+	// The count ignores the page and matches the same filter the list does.
+	for _, tc := range []struct {
+		f    IssueFilter
+		want int
+	}{
+		{IssueFilter{Limit: 5, Offset: 10}, 12},
+		{IssueFilter{Labels: []string{"bulk"}}, 12},
+		{IssueFilter{Query: "nothing matches this"}, 0},
+		{IssueFilter{Archived: "only"}, 0},
+	} {
+		if n, err := s.CountIssues(tc.f); err != nil || n != tc.want {
+			t.Errorf("CountIssues(%+v) = %d, %v; want %d", tc.f, n, err, tc.want)
+		}
+	}
+	if _, err := s.CountIssues(IssueFilter{Labels: []string{"no-such-label"}}); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("CountIssues with an unknown label = %v, want ErrInvalidRef", err)
+	}
 }
 
 func TestCreateIssueStampsPhaseTimestamps(t *testing.T) {

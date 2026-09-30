@@ -97,11 +97,14 @@ type mcpListIssuesIn struct {
 	Archived       string   `json:"archived,omitempty" jsonschema:"archived issues: empty excludes them, true includes them, only returns just them"`
 	OrderBy        string   `json:"order_by,omitempty" jsonschema:"sort order: updated (newest first, the default), created (oldest first) or priority"`
 	Limit          int      `json:"limit,omitempty" jsonschema:"maximum results, default 100, capped at 500"`
-	Offset         int      `json:"offset,omitempty" jsonschema:"skip this many results"`
+	Offset         int      `json:"offset,omitempty" jsonschema:"skip this many results; pass the previous page's next_offset to read the next one"`
 }
 
 type mcpIssuesOut struct {
 	Issues []store.Issue `json:"issues"`
+	// NextOffset is the offset to ask for next, and null when this page was
+	// the last, as in the REST envelope.
+	NextOffset *int `json:"next_offset"`
 }
 
 type mcpGetIssueIn struct {
@@ -232,10 +235,11 @@ type mcpSaveViewIn struct {
 }
 
 type mcpListActivityIn struct {
-	Since   string `json:"since,omitempty" jsonschema:"only events at or after this RFC3339 timestamp"`
-	AfterID int64  `json:"after_id,omitempty" jsonschema:"only events with an id above this, the cursor for paging forward"`
-	Entity  string `json:"entity,omitempty" jsonschema:"restrict to one entity kind: issue, project, milestone, token, setting or view"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"maximum events, default 100, capped at 1000"`
+	Since   string   `json:"since,omitempty" jsonschema:"only events at or after this RFC3339 timestamp"`
+	AfterID int64    `json:"after_id,omitempty" jsonschema:"only events with an id above this, the cursor for paging forward"`
+	Entity  string   `json:"entity,omitempty" jsonschema:"restrict to one entity kind: issue, project, milestone, token, setting or view"`
+	Keys    []string `json:"keys,omitempty" jsonschema:"issue keys whose events to read, up to 100, so several issues' histories come back in one call"`
+	Limit   int      `json:"limit,omitempty" jsonschema:"maximum events, default 100, capped at 1000"`
 }
 
 type mcpActivityOut struct {
@@ -292,7 +296,7 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_issues",
 		Annotations: readOnlyTool(),
-		Description: "List issues filtered by any combination of status names, status types (triage, backlog, unstarted, started, completed, canceled), project, labels, parent, assignee, milestone, priorities, creator, text query and timestamps, ordered by updated, created or priority; or pass view to start from a saved view's filter.",
+		Description: "List issues filtered by any combination of status names, status types (triage, backlog, unstarted, started, completed, canceled), project, labels, parent, assignee, milestone, priorities, creator, text query and timestamps, ordered by updated, created or priority; or pass view to start from a saved view's filter. A full page carries next_offset: pass it as offset to read the next page; null means there are no more.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListIssuesIn) (*mcp.CallToolResult, mcpIssuesOut, error) {
 		filter, err := s.applyView(in.View, tokenActor, role, store.IssueFilter{
 			Statuses:       in.Statuses,
@@ -320,7 +324,7 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		if err != nil {
 			return nil, mcpIssuesOut{}, mcpError(err)
 		}
-		return nil, mcpIssuesOut{Issues: issues}, nil
+		return nil, mcpIssuesOut{Issues: issues, NextOffset: nextOffset(filter, len(issues))}, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -685,13 +689,14 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_activity",
 		Annotations: readOnlyTool(),
-		Description: "Read the audit feed oldest first, filtered by timestamp, entity kind (issue, project, milestone, token, setting, view) or an after_id cursor, so a caller can page forward without missing an event.",
+		Description: "Read the audit feed oldest first, filtered by timestamp, entity kind (issue, project, milestone, token, setting, view), issue keys or an after_id cursor, so a caller can page forward without missing an event.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListActivityIn) (*mcp.CallToolResult, mcpActivityOut, error) {
 		events, err := s.store.ListAllEvents(store.EventFilter{
-			Since:   in.Since,
-			AfterID: in.AfterID,
-			Entity:  in.Entity,
-			Limit:   in.Limit,
+			Since:     in.Since,
+			AfterID:   in.AfterID,
+			Entity:    in.Entity,
+			IssueKeys: in.Keys,
+			Limit:     in.Limit,
 		})
 		if err != nil {
 			return nil, mcpActivityOut{}, mcpError(err)

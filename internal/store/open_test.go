@@ -455,3 +455,41 @@ func TestQuickCheckAndPing(t *testing.T) {
 		t.Errorf("QuickCheck: %v", err)
 	}
 }
+
+// The write-ahead log never shrinks on its own: an automatic checkpoint
+// rewinds it but leaves the file at its high-water size. Checkpoint folds it
+// in and truncates it to zero, and the store keeps working afterwards.
+func TestCheckpointTruncatesWAL(t *testing.T) {
+	s := openTestStore(t)
+	for range 20 {
+		mustCreateIssue(t, s, IssueInput{Title: "fill the log", Description: strings.Repeat("x", 2000)}, "")
+	}
+	wal := s.Path() + "-wal"
+	if info, err := os.Stat(wal); err != nil || info.Size() == 0 {
+		t.Fatalf("wal before checkpoint = %v, %v; want a non-empty log", info, err)
+	}
+	if err := s.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	info, err := os.Stat(wal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Errorf("wal after checkpoint = %d bytes, want 0", info.Size())
+	}
+	issues, err := s.ListIssues(IssueFilter{})
+	if err != nil || len(issues) != 20 {
+		t.Fatalf("after checkpoint: %d issues, %v", len(issues), err)
+	}
+	mustCreateIssue(t, s, IssueInput{Title: "written after"}, "")
+
+	ro, err := OpenReadOnly(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if err := ro.Checkpoint(); err != nil {
+		t.Errorf("read-only Checkpoint = %v, want a no-op", err)
+	}
+}

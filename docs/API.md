@@ -4,7 +4,8 @@ Everything lives under `/api/v1` with bearer auth (`Authorization: Bearer td_...
 
 ## Endpoints
 
-Issues: `GET/POST /api/v1/issues`, `GET/PATCH /api/v1/issues/{key}`,
+Issues: `GET/POST /api/v1/issues`, `PATCH /api/v1/issues` (a batch of
+updates), `GET/PATCH /api/v1/issues/{key}`,
 `POST /api/v1/issues/{key}/description` (append), comments, relations and
 per-issue events under the issue path, `PATCH /api/v1/comments/{id}`.
 Everything else: `GET /api/v1/events` (the global feed),
@@ -38,7 +39,11 @@ or a project slug cannot read as "no work": `status`, `status_type`, `project`,
 Assignees are free-form names, so an unknown one is simply an empty result.
 `GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone`,
 `token`, `setting` or `view` (a comment or a relation is recorded against its
-issue); any other value is a 404.
+issue); any other value is a 404. It also takes `key`, an issue key,
+repeatable up to 100 times: the feed is then those issues' events, oldest
+first with the same `after_id` cursor, so several histories come back in one
+request. A key that names no issue is a 422 `invalid_ref`, and `key` with an
+`entity` other than `issue` is a 400.
 
 ## Views
 
@@ -73,7 +78,8 @@ Every write records a `view.created`, `view.updated`, `view.archived` or
 ## Responses
 
 Every list response is an envelope, never a bare array:
-`{"issues": [...], "next_offset": N|null}`, and `{"comments": [...]}`,
+`{"issues": [...], "next_offset": N|null}` (a full page always carries the
+offset of the next one; `null` means this page was the last), and `{"comments": [...]}`,
 `{"relations": [...]}`, `{"projects": [...]}`, `{"views": [...]}` and so on
 for the rest.
 `GET /api/v1/events` pages with `{"events": [...], "next_after_id": N|null}`.
@@ -86,6 +92,21 @@ PATCH bodies change only the fields they include. `labels` replaces the set;
 token (clearing a description is that field with `"description": ""` beside it,
 so it is the same rule); `expected_version` guards against a lost update. There
 are no DELETE endpoints by design.
+
+`PATCH /api/v1/issues` applies several issue updates in one request:
+`{"updates": [{"key": "ACME-1", "status": "Done"}, {"key": "ACME-2",
+"add_labels": ["ready"], "expected_version": 4}, ...]}`, at most 100 items,
+each carrying a `key` and any fields a single `PATCH /api/v1/issues/{key}`
+takes. Items run in order, each exactly as its own PATCH would: same checks,
+own transaction, own audit event. It is not all-or-nothing: a refused item
+leaves its issue alone and the rest still apply. The answer is 200 with
+`{"results": [...]}`, one per item in request order, each either
+`{"key", "ok": true, "issue": {...}}` or `{"key", "ok": false, "error",
+"code", "status"}` with the code and HTTP status that item would have got on
+its own. Only a malformed request as a whole (not JSON, an unknown field, no
+updates, more than 100) is an error response. The whole request body is capped
+at 1 MiB like any other request, so a large field repeated across many items
+can hit the cap before the 100-item limit.
 
 `POST /api/v1/issues/{key}/relations` with `"remove": true` is idempotent: it
 answers 200 with `{"relations": [...], "removed": true}` when there was a
@@ -144,7 +165,9 @@ Streamable HTTP at `/mcp`, same bearer auth. Fourteen tools: `list_issues`,
 `add_comment`, `list_projects`, `save_project`, `list_milestones`,
 `save_milestone`, `list_labels`, `list_statuses`, `save_relation`,
 `list_views`, `save_view`, `list_activity`. `list_issues` takes `view` to
-start from a saved view's filter, plus `priorities` and `created_by`;
+start from a saved view's filter, plus `priorities` and `created_by`, and
+returns `next_offset` beside the issues as the REST envelope does;
+`list_activity` takes `keys` to read chosen issues' events in one call;
 `save_view` takes a required `mode` of `create` or `update` like `save_issue`,
 and is refused to a token that is neither the view's owner nor an admin. `save_relation` with `remove` is idempotent in the same way as
 the REST endpoint and reports `removed` alongside the relations.

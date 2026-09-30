@@ -460,6 +460,36 @@ func TestMCPListActivity(t *testing.T) {
 	if msg := callErr(t, session, "list_activity", map[string]any{"since": "never"}); msg == "" {
 		t.Error("unparseable since was accepted")
 	}
+
+	// keys reads chosen issues' histories in one call.
+	callTool(t, session, "save_issue", map[string]any{"mode": "create", "title": "unwatched"}, nil)
+	callTool(t, session, "save_issue", map[string]any{"mode": "update", "key": "TSK-1", "priority": 2}, nil)
+	var keyed mcpActivityOut
+	callTool(t, session, "list_activity", map[string]any{"keys": []string{"TSK-1"}}, &keyed)
+	if len(keyed.Events) != 2 || keyed.Events[0].EntityKey != "TSK-1" || keyed.Events[1].Action != "issue.updated" {
+		t.Errorf("keys filter = %+v", keyed.Events)
+	}
+	if msg := callErr(t, session, "list_activity", map[string]any{"keys": []string{"TSK-99"}}); !strings.Contains(msg, "[invalid_ref]") {
+		t.Errorf("unknown key = %q, want invalid_ref", msg)
+	}
+}
+
+// A full page of list_issues says where the next one starts, so a result cut
+// at the limit is never silent; the last page says there is no more.
+func TestMCPListIssuesPaging(t *testing.T) {
+	session, _ := newMCPSession(t)
+	for _, title := range []string{"one", "two", "three"} {
+		callTool(t, session, "save_issue", map[string]any{"mode": "create", "title": title}, nil)
+	}
+	var page mcpIssuesOut
+	callTool(t, session, "list_issues", map[string]any{"limit": 2, "order_by": "created"}, &page)
+	if len(page.Issues) != 2 || page.NextOffset == nil || *page.NextOffset != 2 {
+		t.Fatalf("first page = %+v", page)
+	}
+	callTool(t, session, "list_issues", map[string]any{"limit": 2, "offset": *page.NextOffset, "order_by": "created"}, &page)
+	if len(page.Issues) != 1 || page.Issues[0].Title != "three" || page.NextOffset != nil {
+		t.Errorf("last page = %+v", page)
+	}
 }
 
 func TestMCPRequiresAuth(t *testing.T) {

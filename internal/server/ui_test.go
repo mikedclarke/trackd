@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -433,5 +434,34 @@ func TestUICommentRefusesCrossOrigin(t *testing.T) {
 	resp.Body.Close()
 	if comments, err := st.ListComments(issue.Key); err != nil || len(comments) != 1 {
 		t.Errorf("forwarded-host comment not stored: %v %d", err, len(comments))
+	}
+}
+
+// The board reads one page of at most maxIssueLimit issues. Past that it says
+// how many there are in all instead of dropping the rest without a word.
+func TestUIBoardStatesItsCap(t *testing.T) {
+	ts, client, token, st := newUIEnv(t)
+	for range maxIssueLimit + 2 {
+		if _, _, err := st.CreateIssue(store.IssueInput{Title: "bulk", Status: "Todo"}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := client.PostForm(ts.URL+"/ui/login", url.Values{"token": {token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	code, body := fetch(t, client, ts.URL+"/")
+	if code != http.StatusOK {
+		t.Fatalf("board = %d", code)
+	}
+	want := fmt.Sprintf("showing %d of %d issues", maxIssueLimit, maxIssueLimit+2)
+	if !strings.Contains(body, want) {
+		t.Errorf("board over the cap does not say %q", want)
+	}
+	// Under the cap the count is the plain one.
+	code, body = fetch(t, client, ts.URL+"/?assignee=nobody")
+	if code != http.StatusOK || strings.Contains(body, "showing") || !strings.Contains(body, "0 issues") {
+		t.Errorf("board under the cap = %d, want the plain count", code)
 	}
 }

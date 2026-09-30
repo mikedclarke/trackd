@@ -154,7 +154,10 @@ type EventFilter struct {
 	Since   string
 	AfterID int64
 	Entity  string
-	Limit   int
+	// IssueKeys narrows the feed to these issues' events, so a caller reads
+	// several issues' histories in one request instead of one each.
+	IssueKeys []string
+	Limit     int
 }
 
 type Milestone struct {

@@ -459,6 +459,109 @@ func TestIssueVersionConflict(t *testing.T) {
 	}, http.StatusConflict, codeVersionConflict)
 }
 
+// A batch runs every item through the single update's own path: the same
+// rules, the same error codes, one audit event per change. A failing item
+// neither stops nor undoes the others.
+func TestIssueBatchUpdate(t *testing.T) {
+	e := newTestEnv(t)
+	for _, spec := range []map[string]any{
+		{"title": "one"},
+		{"title": "two", "description": "handoff notes"},
+		{"title": "three"},
+	} {
+		e.expect("POST", "/api/v1/issues", spec, http.StatusCreated, nil)
+	}
+	var resp issueBatchResponse
+	e.expect("PATCH", "/api/v1/issues", map[string]any{"updates": []map[string]any{
+		{"key": "TSK-1", "status": "Done", "actor": "Alex"},
+		{"key": "TSK-2", "description": "overwritten"},
+		{"key": "tsk-3", "priority": 2, "expected_version": 0},
+		{"key": "TSK-3", "priority": 3, "expected_version": 0},
+		{"key": "TSK-99", "status": "Done"},
+		{"key": "", "status": "Done"},
+		{"key": "TSK-1"},
+		{"key": "TSK-1", "description": "", "replace_description": true},
+		{"key": "TSK-1", "add_labels": []string{"no-such-label"}},
+	}}, http.StatusOK, &resp)
+	want := []struct {
+		key    string
+		status int
+		code   string
+	}{
+		{"TSK-1", 0, ""},
+		{"TSK-2", http.StatusConflict, codeDescriptionReplace},
+		{"tsk-3", 0, ""},
+		{"TSK-3", http.StatusConflict, codeVersionConflict},
+		{"TSK-99", http.StatusNotFound, codeNotFound},
+		{"", http.StatusBadRequest, codeValidation},
+		{"TSK-1", http.StatusBadRequest, codeValidation},
+		{"TSK-1", http.StatusForbidden, codeForbidden},
+		{"TSK-1", http.StatusUnprocessableEntity, codeInvalidRef},
+	}
+	if len(resp.Results) != len(want) {
+		t.Fatalf("results = %+v", resp.Results)
+	}
+	for i, w := range want {
+		got := resp.Results[i]
+		ok := w.code == ""
+		if got.Key != w.key || got.OK != ok || got.Status != w.status || got.Code != w.code || (ok != (got.Issue != nil)) {
+			t.Errorf("result %d = %+v, want key %q status %d code %q", i, got, w.key, w.status, w.code)
+		}
+		if !ok && got.Error == "" {
+			t.Errorf("result %d carries no error message", i)
+		}
+	}
+	if issue := resp.Results[0].Issue; issue == nil || issue.Status != "Done" || issue.Version != 1 {
+		t.Errorf("first item's issue = %+v", issue)
+	}
+	if issue := resp.Results[2].Issue; issue == nil || issue.Key != "TSK-3" || issue.Priority != 2 {
+		t.Errorf("third item's issue = %+v", issue)
+	}
+
+	// Two items changed something, so there are exactly two update events,
+	// each with its own actor.
+	var feed eventListResponse
+	e.expect("GET", "/api/v1/events?entity=issue", nil, http.StatusOK, &feed)
+	var updates []string
+	for _, ev := range feed.Events {
+		if ev.Action == "issue.updated" {
+			updates = append(updates, ev.EntityKey+" "+ev.Actor)
+		}
+	}
+	if strings.Join(updates, ",") != "TSK-1 Alex,TSK-3 pm" {
+		t.Errorf("update events = %v", updates)
+	}
+	// The refused items left their issues alone.
+	var two store.Issue
+	e.expect("GET", "/api/v1/issues/TSK-2", nil, http.StatusOK, &two)
+	if two.Description != "handoff notes" || two.Version != 0 {
+		t.Errorf("refused item changed its issue: %+v", two)
+	}
+
+	// An admin token may replace a description in a batch as on its own.
+	e.withToken(e.adminToken(), func() {
+		e.expect("PATCH", "/api/v1/issues", map[string]any{"updates": []map[string]any{
+			{"key": "TSK-2", "description": "replaced", "replace_description": true},
+		}}, http.StatusOK, &resp)
+	})
+	if len(resp.Results) != 1 || !resp.Results[0].OK || resp.Results[0].Issue.Description != "replaced" {
+		t.Errorf("admin batch replace = %+v", resp.Results)
+	}
+
+	// Only a malformed request as a whole is an error.
+	tooMany := make([]map[string]any, maxBatchUpdates+1)
+	for i := range tooMany {
+		tooMany[i] = map[string]any{"key": "TSK-1", "priority": 1}
+	}
+	e.expectError("PATCH", "/api/v1/issues", map[string]any{"updates": tooMany}, http.StatusBadRequest, codeValidation)
+	e.expectError("PATCH", "/api/v1/issues", map[string]any{"updates": []any{}}, http.StatusBadRequest, codeValidation)
+	e.expectError("PATCH", "/api/v1/issues", map[string]any{}, http.StatusBadRequest, codeValidation)
+	e.expectError("PATCH", "/api/v1/issues", map[string]any{"updates": []map[string]any{
+		{"key": "TSK-1", "stauts": "Done"},
+	}}, http.StatusBadRequest, codeValidation)
+	e.expectError("PATCH", "/api/v1/issues", map[string]any{"changes": []any{}}, http.StatusBadRequest, codeValidation)
+}
+
 func TestDescriptionIsAppendOnly(t *testing.T) {
 	e := newTestEnv(t)
 	var issue store.Issue
@@ -729,6 +832,37 @@ func TestEventFeeds(t *testing.T) {
 	e.expectError("GET", "/api/v1/events?entitiy=issue", nil, http.StatusBadRequest, codeValidation)
 	e.expectError("GET", "/api/v1/events?since=never", nil, http.StatusBadRequest, codeValidation)
 	e.expectError("GET", "/api/v1/events?after_id=x", nil, http.StatusBadRequest, codeValidation)
+}
+
+// The global feed narrowed by issue keys reads several issues' histories in
+// one request, with the same cursor as the plain feed.
+func TestEventFeedByIssueKeys(t *testing.T) {
+	e := newTestEnv(t)
+	for _, title := range []string{"one", "two", "three"} {
+		e.expect("POST", "/api/v1/issues", map[string]any{"title": title}, http.StatusCreated, nil)
+	}
+	e.expect("PATCH", "/api/v1/issues/TSK-1", map[string]any{"priority": 2}, http.StatusOK, nil)
+
+	var feed eventListResponse
+	e.expect("GET", "/api/v1/events?key=TSK-1&key=TSK-3", nil, http.StatusOK, &feed)
+	var got []string
+	for _, ev := range feed.Events {
+		got = append(got, ev.EntityKey+" "+ev.Action)
+	}
+	if strings.Join(got, ",") != "TSK-1 issue.created,TSK-3 issue.created,TSK-1 issue.updated" || feed.NextAfterID != nil {
+		t.Fatalf("keyed feed = %v, next %v", got, feed.NextAfterID)
+	}
+	var page eventListResponse
+	e.expect("GET", "/api/v1/events?key=TSK-1&key=TSK-3&limit=2", nil, http.StatusOK, &page)
+	if len(page.Events) != 2 || page.NextAfterID == nil {
+		t.Fatalf("keyed first page = %+v", page)
+	}
+	e.expect("GET", fmt.Sprintf("/api/v1/events?key=TSK-1&key=TSK-3&after_id=%d", *page.NextAfterID), nil, http.StatusOK, &page)
+	if len(page.Events) != 1 || page.Events[0].Action != "issue.updated" {
+		t.Errorf("keyed page after cursor = %+v", page)
+	}
+	e.expectError("GET", "/api/v1/events?key=TSK-1&key=TSK-99", nil, http.StatusUnprocessableEntity, codeInvalidRef)
+	e.expectError("GET", "/api/v1/events?key=TSK-1&entity=project", nil, http.StatusBadRequest, codeValidation)
 }
 
 func TestRelationEndpoints(t *testing.T) {
@@ -1025,6 +1159,36 @@ func TestBackupSkipsRecentSnapshot(t *testing.T) {
 	code, body := e.health()
 	if code != http.StatusOK || body.Backup.LastAt == "" {
 		t.Errorf("health after skip = %d %+v", code, body.Backup)
+	}
+}
+
+// A scheduled backup ends with a checkpoint, so the write-ahead log does not
+// sit at its high-water size between restarts.
+func TestBackupCheckpointsWAL(t *testing.T) {
+	e := newTestEnv(t)
+	for i := range 20 {
+		e.expect("POST", "/api/v1/issues", map[string]any{"title": fmt.Sprintf("issue %d", i), "description": strings.Repeat("x", 2000)}, http.StatusCreated, nil)
+	}
+	wal := e.store.Path() + "-wal"
+	if info, err := os.Stat(wal); err != nil || info.Size() == 0 {
+		t.Fatalf("wal before backup = %v, %v; want a non-empty log", info, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.server.RunBackups(ctx, BackupConfig{Dir: t.TempDir(), Every: time.Hour})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		info, err := os.Stat(wal)
+		if err == nil && info.Size() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("wal after backup = %v, %v; want it truncated to 0", info, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code, body := e.health(); code != http.StatusOK || body.Backup.LastAt == "" {
+		t.Errorf("health after backup = %d %+v", code, body.Backup)
 	}
 }
 

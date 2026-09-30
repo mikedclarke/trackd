@@ -18,7 +18,7 @@ import (
 	"github.com/mikedclarke/trackd/internal/store"
 )
 
-const version = "0.3.2"
+const version = "0.4.0"
 
 func main() {
 	err := run(os.Args[1:])
@@ -28,8 +28,10 @@ func main() {
 	// --json callers parse stdout, so the machine-readable error goes there and
 	// the human line to stderr. A help request is not a failure: the flag
 	// package has already printed the usage, so neither the JSON error object
-	// nor the stderr line is added for it.
-	if wantsJSON(os.Args[1:]) && !errors.Is(err, flag.ErrHelp) {
+	// nor the stderr line is added for it. A batch with refused items has
+	// already printed its results, errors included, as the one JSON document.
+	var batch *batchError
+	if wantsJSON(os.Args[1:]) && !errors.Is(err, flag.ErrHelp) && !errors.As(err, &batch) {
 		_ = printJSON(errorObject(err))
 	}
 	if !errors.Is(err, flag.ErrHelp) {
@@ -202,6 +204,11 @@ func cmdServe(args []string) error {
 		return err
 	}
 	<-shutdownDone
+	// Every request has finished, so the write-ahead log can be folded into
+	// the database file and truncated before the process exits.
+	if err := st.Checkpoint(); err != nil {
+		log.Printf("%v", err)
+	}
 	return nil
 }
 

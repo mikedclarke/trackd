@@ -88,6 +88,13 @@ func usagef(format string, args ...any) error {
 // works whatever issue_prefix a server is configured with.
 var issueKeyRe = regexp.MustCompile(`^[A-Z]+-\d+$`)
 
+// issueKeyShape is looser than issueKeyRe: any case, and digits after the
+// first letter, so it matches every key an issue_prefix can make plus
+// imported ones. A multi-key update checks each bare word against it, so an
+// unquoted flag value ("--title Fix the bug") is refused instead of being
+// read as more keys.
+var issueKeyShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*-[0-9]+$`)
+
 // oneOf returns the non-empty value of two flags that mean the same thing (a
 // primary name and an alias), or a usage error if both are set. Empty is a
 // valid result: the caller still enforces "required".
@@ -142,9 +149,11 @@ func (s *stringSlice) hasEmpty() bool {
 }
 
 // readValue returns v, or all of stdin when v is "-", so long markdown bodies
-// can be piped in. Empty stdin is a mistake, never an instruction to write an
-// empty description: a pipeline that produced nothing would otherwise wipe the
-// field it was meant to fill.
+// can be piped in. Stdin is kept byte for byte, trailing newline included: a
+// caller that writes a body and reads it back compares what it sent. Empty
+// stdin is a mistake, never an instruction to write an empty description: a
+// pipeline that produced nothing would otherwise wipe the field it was meant
+// to fill.
 func readValue(flagName, v string) (string, error) {
 	if v != "-" {
 		return v, nil
@@ -153,7 +162,7 @@ func readValue(flagName, v string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text := strings.TrimRight(string(b), "\n")
+	text := string(b)
 	if strings.TrimSpace(text) == "" {
 		return "", usagef("--%s -: stdin was empty", flagName)
 	}
@@ -318,9 +327,10 @@ func issueList(args []string) error {
 	completedSince := fs.String("completed-since", "", "only issues completed at or after this RFC3339 time")
 	archived := fs.Bool("archived", false, "include archived issues")
 	archivedOnly := fs.Bool("archived-only", false, "only archived issues")
-	orderBy := fs.String("order-by", "", "sort order: updated (default), created, priority")
-	limit := fs.Int("limit", 0, "maximum results (default 100, max 500)")
+	orderBy := fs.String("order-by", "", "sort order: updated (default; created with --all), created, priority")
+	limit := fs.Int("limit", 0, "maximum results per page (default 100, max 500)")
 	offset := fs.Int("offset", 0, "skip this many results")
+	all := fs.Bool("all", false, "follow next_offset and print every page, not just the first; sorts by created unless --order-by is given, so an issue updated mid-walk is neither skipped nor repeated")
 	columns := fs.String("columns", "", "flat output of only these columns, comma-separated from "+strings.Join(issueColumns, ",")+" (default all); not valid with --json")
 	tsv := fs.Bool("tsv", false, "flat tab-separated output for machine reading, no padding; not valid with --json")
 	if err := parseFlags(fs, args, "trackd issue list [flags]"); err != nil {
@@ -352,6 +362,15 @@ func issueList(args []string) error {
 		}
 		q.Priorities = append(q.Priorities, p)
 	}
+	if *all && q.Limit == 0 {
+		q.Limit = 500 // the server's largest page: the fewest round trips
+	}
+	if *all && q.OrderBy == "" {
+		// The default order is most recently updated first, so an update
+		// between two pages would shift every later row: one issue repeated,
+		// another never shown. Oldest created first only grows at the end.
+		q.OrderBy = "created"
+	}
 	switch {
 	case *archivedOnly:
 		q.Archived = "only"
@@ -365,6 +384,14 @@ func issueList(args []string) error {
 	issues, next, err := cl.ListIssues(q)
 	if err != nil {
 		return err
+	}
+	for *all && next != nil {
+		q.Offset = *next
+		var page []store.Issue
+		if page, next, err = cl.ListIssues(q); err != nil {
+			return err
+		}
+		issues = append(issues, page...)
 	}
 	if *common.jsonOut {
 		return printJSON(map[string]any{"issues": issues, "next_offset": next})
@@ -382,7 +409,7 @@ func issueList(args []string) error {
 		return err
 	}
 	if next != nil {
-		fmt.Printf("more results: --offset %d\n", *next)
+		fmt.Printf("more results: --offset %d (or --all)\n", *next)
 	}
 	return nil
 }
@@ -528,12 +555,25 @@ func issueUpdate(args []string) error {
 	archive := fs.Bool("archive", false, "archive the issue")
 	unarchive := fs.Bool("unarchive", false, "unarchive the issue")
 	actor := fs.String("actor", "", "actor recorded on the audit trail (default: token name)")
-	lead, err := parseArgs(fs, args, 1, "trackd issue update <key> [flags]")
+	keys, err := collectArgs(fs, args)
 	if err != nil {
 		return err
 	}
+	if len(keys) == 0 {
+		return usagef("usage: trackd issue update <key> [<key>...] [flags]")
+	}
+	if len(keys) > 1 {
+		for _, k := range keys {
+			if !issueKeyShape.MatchString(k) {
+				return usagef("%q is not an issue key; quote a flag value that has spaces", k)
+			}
+		}
+	}
+	if err := checkEmptyFlags(fs); err != nil {
+		return err
+	}
 	set := setFlags(fs)
-	key := lead[0]
+	key := keys[0]
 	c, err := common.client()
 	if err != nil {
 		return err
@@ -619,6 +659,10 @@ func issueUpdate(args []string) error {
 		patch.Archived = &no
 	}
 
+	if len(keys) > 1 {
+		return updateMany(c, keys, patch, set, *common.jsonOut)
+	}
+
 	// An append is its own request: the server refuses to overwrite a written
 	// description, so appending and patching cannot share one call.
 	if set["append"] {
@@ -652,6 +696,65 @@ func issueUpdate(args []string) error {
 	}
 	return reportIssue(issue, *common.jsonOut, "updated")
 }
+
+// updateMany applies one patch to several issues in a single batch request.
+// The server updates each issue on its own, with its own audit event, and one
+// refusal does not stop the rest, so the report has a line per key.
+func updateMany(c *client.Client, keys []string, patch client.IssuePatch, set map[string]bool, jsonOut bool) error {
+	switch {
+	case set["append"]:
+		return usagef("--append takes one key; append to each issue with its own command")
+	case set["expected-version"]:
+		return usagef("--expected-version names one issue's version; it takes one key")
+	case isEmptyPatch(patch):
+		return usagef("nothing to update: give at least one field flag")
+	}
+	updates := make([]client.IssueBatchUpdate, len(keys))
+	for i, k := range keys {
+		updates[i] = client.IssueBatchUpdate{Key: k, Patch: patch}
+	}
+	results, err := c.UpdateIssues(updates)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		if err := printJSON(map[string]any{"results": results}); err != nil {
+			return err
+		}
+	}
+	var failed []client.IssueBatchResult
+	for _, r := range results {
+		switch {
+		case !r.OK:
+			failed = append(failed, r)
+			if !jsonOut {
+				fmt.Printf("%s failed: %s (HTTP %d %s)\n", r.Key, r.Error, r.Status, r.Code)
+			}
+		case !jsonOut:
+			fmt.Printf("%s updated (%s, version %d)\n", r.Issue.Key, r.Issue.Status, r.Issue.Version)
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	first := failed[0]
+	return &batchError{failed: len(failed), total: len(results),
+		first: &client.APIError{Status: first.Status, Code: first.Code, Message: first.Key + ": " + first.Error}}
+}
+
+// batchError is a batch in which some items were refused. The per-item report
+// is already printed, --json included, so main adds only the stderr line. It
+// unwraps to the first refusal, whose status sets the exit code.
+type batchError struct {
+	failed, total int
+	first         *client.APIError
+}
+
+func (e *batchError) Error() string {
+	return fmt.Sprintf("%d of %d updates failed; first: %s", e.failed, e.total, e.first)
+}
+
+func (e *batchError) Unwrap() error { return e.first }
 
 // isEmptyPatch reports whether a patch would send no field at all, which is a
 // mistyped command rather than a request worth making.
@@ -907,6 +1010,8 @@ func cmdEvents(args []string) error {
 	since := fs.String("since", "", "only events at or after this RFC3339 time")
 	afterID := fs.Int64("after-id", 0, "only events after this event id (the cursor from a previous run)")
 	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone, token, setting or view (a comment or a relation is recorded against its issue)")
+	var keys stringSlice
+	fs.Var(&keys, "key", "only this issue's events (repeatable, up to 100: several issues' histories in one request)")
 	limit := fs.Int("limit", 0, "maximum events (default 100, max 1000)")
 	if err := parseFlags(fs, args, "trackd events [flags]"); err != nil {
 		return err
@@ -916,7 +1021,7 @@ func cmdEvents(args []string) error {
 		return err
 	}
 	events, next, err := cl.ListEvents(client.EventQuery{
-		Since: *since, AfterID: *afterID, Entity: *entity, Limit: *limit,
+		Since: *since, AfterID: *afterID, Entity: *entity, IssueKeys: keys, Limit: *limit,
 	})
 	if err != nil {
 		return err
@@ -1624,6 +1729,11 @@ func printIssuesFlat(issues []store.Issue, cols []string, tsv bool, next *int) e
 		for _, i := range issues {
 			fmt.Println(row(i))
 		}
+		// The records stay clean; the cut is still said, where a reader of
+		// stdout does not trip over it.
+		if next != nil {
+			fmt.Fprintf(os.Stderr, "more results: --offset %d (or --all)\n", *next)
+		}
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -1639,7 +1749,7 @@ func printIssuesFlat(issues []store.Issue, cols []string, tsv bool, next *int) e
 		return err
 	}
 	if next != nil {
-		fmt.Printf("more results: --offset %d\n", *next)
+		fmt.Printf("more results: --offset %d (or --all)\n", *next)
 	}
 	return nil
 }
