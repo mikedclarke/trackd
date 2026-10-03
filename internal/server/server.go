@@ -222,16 +222,42 @@ func (s *Server) agentLabel(role string, labels []string) ([]string, error) {
 	return append(labels, label.Name), nil
 }
 
-// actor resolves attribution for a write: an explicit actor in the request
-// body wins, otherwise the authenticating token's name is used.
-func actor(r *http.Request, explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
+// tokenName is the authenticating token's name, for the reads and ownership
+// checks that go by who is asking.
+func tokenName(r *http.Request) string {
 	if t, ok := r.Context().Value(tokenKey).(*store.Token); ok {
 		return t.Name
 	}
 	return ""
+}
+
+// actor resolves attribution for a REST write; resolveActor holds the rule.
+func (s *Server) actor(r *http.Request, explicit string) (string, error) {
+	return s.resolveActor(tokenName(r), tokenRole(r), explicit)
+}
+
+// resolveActor resolves attribution for a write, REST or MCP: an explicit
+// actor in the request wins, otherwise the token's own name is used. With the
+// actor_from_token setting on, only an admin token may name someone else. Any
+// other token naming another actor is refused rather than quietly rewritten,
+// so a caller that expected that name on the record finds out it will not be
+// there. Naming itself is always fine, so a script that passes its own name
+// keeps working when the setting is turned on.
+func (s *Server) resolveActor(name, role, explicit string) (string, error) {
+	if explicit == "" || explicit == name {
+		return name, nil
+	}
+	if role == roleAdmin {
+		return explicit, nil
+	}
+	on, err := s.store.Setting("actor_from_token")
+	if err != nil {
+		return "", err
+	}
+	if on == "true" {
+		return "", errActorNotSelf
+	}
+	return explicit, nil
 }
 
 type healthResponse struct {
@@ -555,6 +581,10 @@ const (
 // runbook is not the one who notices.
 var errAdminOnly = errors.New("replacing a description needs an admin token; agents use append")
 
+// errActorNotSelf refuses a non-admin write that names another actor while the
+// operator has actor_from_token on.
+var errActorNotSelf = errors.New("naming another actor needs an admin token while actor_from_token is on; omit actor to write as this token")
+
 type errorBody struct {
 	Error string `json:"error"`
 	Code  string `json:"code"`
@@ -594,7 +624,7 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, codeNotFound
 	case errors.Is(err, store.ErrBusy):
 		return http.StatusServiceUnavailable, codeBusy
-	case errors.Is(err, errAdminOnly), errors.Is(err, errViewOwner):
+	case errors.Is(err, errAdminOnly), errors.Is(err, errViewOwner), errors.Is(err, errActorNotSelf):
 		return http.StatusForbidden, codeForbidden
 	case isInternal(err):
 		return http.StatusInternalServerError, codeInternal

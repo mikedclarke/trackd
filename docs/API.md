@@ -2,6 +2,8 @@
 
 Everything lives under `/api/v1` with bearer auth (`Authorization: Bearer td_...`). Mint tokens with `trackd token add <name>`.
 
+Every write body takes an optional `actor`, the name recorded on the audit event (and on a comment, or as a new view's owner); left out, it is the token's name. With the `actor_from_token` setting on, an `agent` token may only name itself: an `actor` naming anyone else is a 403 `forbidden` and nothing is written, on these routes and on the MCP tools alike. An `admin` token may name anyone either way. In a batch update the refusal is that item's result, as for any other per-item error.
+
 ## Endpoints
 
 Issues: `GET/POST /api/v1/issues`, `PATCH /api/v1/issues` (a batch of
@@ -125,7 +127,7 @@ with and the exit code the CLI turns it into.
 |---|---|---|---|
 | `validation` | 400 | 2 | The request itself is malformed: an unknown JSON field or query parameter, a body that is not JSON, a value out of range, a patch with nothing in it, an unknown enum value such as a relation type or a project status |
 | `unauthorized` | 401 | 4 | No bearer token, or one that is unknown or revoked |
-| `forbidden` | 403 | 4 | A real write this token may not make: replacing or clearing a description needs an `admin` token, and changing a view needs its owner or an `admin` token |
+| `forbidden` | 403 | 4 | A real write this token may not make: replacing or clearing a description needs an `admin` token, changing a view needs its owner or an `admin` token, and with `actor_from_token` on, naming an `actor` other than the token's own needs an `admin` token |
 | `not_found` | 404 | 3 | The issue, project, milestone, comment or view does not exist, or a view is private to another token or archived |
 | `conflict` | 409 | 5 | A uniqueness or exclusivity rule: a project name or slug already taken, a milestone name already used in its project, a view name already in use, two labels from one exclusive group |
 | `version_conflict` | 409 | 5 | `expected_version` did not match, so another writer got there first |

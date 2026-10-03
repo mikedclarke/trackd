@@ -7,6 +7,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-03
+
+### Added
+
+- `actor_from_token` setting (`trackd setting set actor_from_token true`), off
+  by default. When on, only an `admin` token may name an `actor` other than
+  itself on a write; an `agent` token that names someone else is refused with
+  a 403 `forbidden` (CLI exit 4) and nothing is written. It covers every REST
+  write that takes `actor` (issue create, update, batch update and append;
+  comment add and edit; relations; project, milestone and view create and
+  update) and the matching MCP tools (`save_issue`, `add_comment`,
+  `save_relation`, `save_project`, `save_milestone`, `save_view`). Naming the
+  token's own name, or leaving `actor` out, still works. Off, behaviour is
+  unchanged.
+
 ## [0.4.0] - 2026-09-30
 
 ### Added

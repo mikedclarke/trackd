@@ -160,6 +160,9 @@ trackd setting set label_groups '[["ready","blocked"]]'
 trackd setting set base_url https://trackd.example.com
 trackd setting set agent_label source:agent  # auto-tag issues created by non-admin tokens; empty disables
 trackd setting set workspace_name "Acme Tasks"  # name shown in the web board header; empty shows just the wordmark
+trackd setting set actor_from_token true    # only admin tokens may pass --actor for someone else; false (the default) allows any
 ```
+
+With `actor_from_token` on, a client command run with an `agent` token and an `--actor` other than the token's own name fails with exit 4 and changes nothing; drop `--actor` (or pass the token's own name) and the write is attributed to the token.
 
 Every `set` records a `setting.updated` event with the old and new value (`trackd events --entity setting`). `set` writes to the database file, so it refuses while a server is running on it. `list` and `get` open the file read-only and are safe at any time.

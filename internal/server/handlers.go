@@ -136,7 +136,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
-	filter, err := s.applyView(q.Get("view"), actor(r, ""), tokenRole(r), store.IssueFilter{
+	filter, err := s.applyView(q.Get("view"), tokenName(r), tokenRole(r), store.IssueFilter{
 		Statuses:       q["status"],
 		StatusTypes:    q["status_type"],
 		Project:        q.Get("project"),
@@ -199,6 +199,11 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	labels, err := s.agentLabel(tokenRole(r), req.Labels)
 	if err != nil {
 		writeStoreError(w, r, err)
@@ -216,7 +221,7 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		DueDate:        req.DueDate,
 		Labels:         labels,
 		IdempotencyKey: req.IdempotencyKey,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -291,6 +296,10 @@ func (s *Server) patchIssue(r *http.Request, key string, req issuePatchReq) (*st
 	if req.empty() {
 		return nil, errEmptyPatch
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		return nil, err
+	}
 	return s.store.UpdateIssue(key, store.IssuePatch{
 		Title:              req.Title,
 		Description:        req.Description,
@@ -307,7 +316,7 @@ func (s *Server) patchIssue(r *http.Request, key string, req issuePatchReq) (*st
 		RemoveLabels:       req.RemoveLabels,
 		ExpectedVersion:    req.ExpectedVersion,
 		Archived:           req.Archived,
-	}, actor(r, req.Actor))
+	}, act)
 }
 
 // maxBatchUpdates bounds one batch request, so a single call cannot hold the
@@ -392,7 +401,12 @@ func (s *Server) handleAppendDescription(w http.ResponseWriter, r *http.Request)
 		writeValidation(w, err.Error())
 		return
 	}
-	issue, err := s.store.AppendDescription(r.PathValue("key"), req.Append, actor(r, req.Actor))
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	issue, err := s.store.AppendDescription(r.PathValue("key"), req.Append, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -429,11 +443,16 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	comment, created, err := s.store.AddComment(r.PathValue("key"), store.CommentInput{
 		Body:           req.Body,
 		ParentID:       req.ParentID,
 		IdempotencyKey: req.IdempotencyKey,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -461,7 +480,12 @@ func (s *Server) handlePatchComment(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
-	comment, err := s.store.UpdateComment(id, req.Body, actor(r, req.Actor))
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	comment, err := s.store.UpdateComment(id, req.Body, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -503,9 +527,12 @@ func (s *Server) handleSetRelation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
-	act := actor(r, req.Actor)
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	var removed *bool
-	var err error
 	if req.Remove {
 		var gone bool
 		gone, err = s.store.RemoveRelation(key, req.Related, req.Type, act)
@@ -673,6 +700,11 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	project, err := s.store.CreateProject(store.ProjectInput{
 		Name:        req.Name,
 		Slug:        req.Slug,
@@ -681,7 +713,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		Labels:      req.Labels,
 		StartDate:   req.StartDate,
 		TargetDate:  req.TargetDate,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -727,6 +759,11 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "empty patch: no fields to update")
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	project, err := s.store.UpdateProject(r.PathValue("slug"), store.ProjectPatch{
 		Name:         req.Name,
 		Description:  req.Description,
@@ -737,7 +774,7 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		RemoveLabels: req.RemoveLabels,
 		StartDate:    req.StartDate,
 		TargetDate:   req.TargetDate,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -780,12 +817,17 @@ func (s *Server) handleCreateMilestone(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	milestone, err := s.store.CreateMilestone(store.MilestoneInput{
 		Project:     req.Project,
 		Name:        req.Name,
 		Description: req.Description,
 		TargetDate:  req.TargetDate,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -830,12 +872,17 @@ func (s *Server) handlePatchMilestone(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "empty patch: no fields to update")
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	milestone, err := s.store.UpdateMilestone(id, store.MilestonePatch{
 		Name:        req.Name,
 		Description: req.Description,
 		TargetDate:  req.TargetDate,
 		Archived:    req.Archived,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return

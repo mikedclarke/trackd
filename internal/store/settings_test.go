@@ -35,6 +35,11 @@ func TestValidateSetting(t *testing.T) {
 		{"workspace_name", "Acme Tasks", true},
 		{"workspace_name", "line one\nline two", false},
 		{"workspace_name", strings.Repeat("x", 101), false},
+		{"actor_from_token", "true", true},
+		{"actor_from_token", "false", true},
+		{"actor_from_token", "", false},
+		{"actor_from_token", "TRUE", false},
+		{"actor_from_token", "on", false},
 		{"issue_seq", "5", false},
 		{"nope", "x", false},
 	}
@@ -84,6 +89,9 @@ func TestListSettings(t *testing.T) {
 	}
 	if got["label_groups"].Value != "" {
 		t.Errorf("default label_groups = %q, want empty", got["label_groups"].Value)
+	}
+	if got["actor_from_token"].Value != "false" {
+		t.Errorf("default actor_from_token = %q, want false", got["actor_from_token"].Value)
 	}
 	if !got["issue_seq"].ReadOnly {
 		t.Error("issue_seq should be read-only")

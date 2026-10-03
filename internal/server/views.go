@@ -67,7 +67,7 @@ func (s *Server) handleListViews(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
-	views, err := s.store.ListViews(actor(r, ""), tokenRole(r) == roleAdmin, q.Get("archived") == "true")
+	views, err := s.store.ListViews(tokenName(r), tokenRole(r) == roleAdmin, q.Get("archived") == "true")
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -90,13 +90,18 @@ func (s *Server) handleCreateView(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, err.Error())
 		return
 	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
 	view, err := s.store.CreateView(store.ViewInput{
 		Name:         req.Name,
 		Description:  req.Description,
 		Filter:       req.Filter,
 		QuickActions: req.QuickActions,
 		Shared:       req.Shared,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -105,7 +110,7 @@ func (s *Server) handleCreateView(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetView(w http.ResponseWriter, r *http.Request) {
-	view, err := s.visibleView(r.PathValue("name"), actor(r, ""), tokenRole(r))
+	view, err := s.visibleView(r.PathValue("name"), tokenName(r), tokenRole(r))
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -138,14 +143,19 @@ func (s *Server) handlePatchView(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "empty patch: no fields to update")
 		return
 	}
-	act, role := actor(r, ""), tokenRole(r)
-	view, err := s.visibleView(r.PathValue("name"), act, role)
+	who, role := tokenName(r), tokenRole(r)
+	view, err := s.visibleView(r.PathValue("name"), who, role)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
 	}
-	if !canEditView(view, act, role) {
+	if !canEditView(view, who, role) {
 		writeStoreError(w, r, errViewOwner)
+		return
+	}
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
 		return
 	}
 	updated, err := s.store.UpdateView(view.Name, store.ViewPatch{
@@ -155,7 +165,7 @@ func (s *Server) handlePatchView(w http.ResponseWriter, r *http.Request) {
 		QuickActions: req.QuickActions,
 		Shared:       req.Shared,
 		Archived:     req.Archived,
-	}, actor(r, req.Actor))
+	}, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return

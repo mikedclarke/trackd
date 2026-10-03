@@ -704,6 +704,131 @@ func TestAgentLabelAutoApply(t *testing.T) {
 	}
 }
 
+// actor_from_token, when on, lets only an admin token name another actor, on
+// every REST write that takes one; an agent token naming someone else is
+// refused with a 403 and nothing is written. Off (the default), any token may
+// name any actor. Naming yourself or naming no one always works.
+func TestActorFromToken(t *testing.T) {
+	e := newTestEnv(t) // agent token "pm"
+	admin := e.adminToken()
+	for i := 1; i <= 7; i++ {
+		e.expect("POST", "/api/v1/issues", map[string]any{"title": fmt.Sprintf("seed %d", i)}, http.StatusCreated, nil)
+	}
+	var comment store.Comment
+	e.expect("POST", "/api/v1/issues/TSK-1/comments", map[string]any{"body": "seed"}, http.StatusCreated, &comment)
+	e.expect("POST", "/api/v1/projects", map[string]any{"name": "Plan"}, http.StatusCreated, nil)
+	var milestone store.Milestone
+	e.expect("POST", "/api/v1/milestones", map[string]any{"project": "plan", "name": "Seed"}, http.StatusCreated, &milestone)
+	e.expect("POST", "/api/v1/views", map[string]any{"name": "seed", "filter": map[string]any{"statuses": []string{"Todo"}}}, http.StatusCreated, nil)
+
+	// Each write takes the round number so a repeat is a real change: a fresh
+	// title, a new name, a relation to an issue not yet linked.
+	writes := []struct {
+		name, method, path string
+		body               func(round int) map[string]any
+	}{
+		{"create issue", "POST", "/api/v1/issues", func(n int) map[string]any { return map[string]any{"title": fmt.Sprintf("made %d", n)} }},
+		{"update issue", "PATCH", "/api/v1/issues/TSK-1", func(n int) map[string]any { return map[string]any{"title": fmt.Sprintf("renamed %d", n)} }},
+		{"append description", "POST", "/api/v1/issues/TSK-1/description", func(n int) map[string]any { return map[string]any{"append": fmt.Sprintf("note %d", n)} }},
+		{"add comment", "POST", "/api/v1/issues/TSK-1/comments", func(n int) map[string]any { return map[string]any{"body": fmt.Sprintf("comment %d", n)} }},
+		{"edit comment", "PATCH", fmt.Sprintf("/api/v1/comments/%d", comment.ID), func(n int) map[string]any { return map[string]any{"body": fmt.Sprintf("edit %d", n)} }},
+		{"add relation", "POST", "/api/v1/issues/TSK-1/relations", func(n int) map[string]any {
+			return map[string]any{"related": fmt.Sprintf("TSK-%d", n+2), "type": "relates"}
+		}},
+		{"create project", "POST", "/api/v1/projects", func(n int) map[string]any { return map[string]any{"name": fmt.Sprintf("Project %d", n)} }},
+		{"update project", "PATCH", "/api/v1/projects/plan", func(n int) map[string]any { return map[string]any{"description": fmt.Sprintf("about %d", n)} }},
+		{"create milestone", "POST", "/api/v1/milestones", func(n int) map[string]any { return map[string]any{"project": "plan", "name": fmt.Sprintf("M%d", n)} }},
+		{"update milestone", "PATCH", fmt.Sprintf("/api/v1/milestones/%d", milestone.ID), func(n int) map[string]any { return map[string]any{"description": fmt.Sprintf("about %d", n)} }},
+		{"create view", "POST", "/api/v1/views", func(n int) map[string]any {
+			return map[string]any{"name": fmt.Sprintf("view %d", n), "filter": map[string]any{"statuses": []string{"Todo"}}}
+		}},
+		{"update view", "PATCH", "/api/v1/views/seed", func(n int) map[string]any { return map[string]any{"description": fmt.Sprintf("about %d", n)} }},
+	}
+
+	var last int64
+	newEvents := func() []store.Event {
+		t.Helper()
+		var feed eventListResponse
+		e.expect("GET", fmt.Sprintf("/api/v1/events?after_id=%d&limit=500", last), nil, http.StatusOK, &feed)
+		if n := len(feed.Events); n > 0 {
+			last = feed.Events[n-1].ID
+		}
+		return feed.Events
+	}
+	newEvents()
+
+	// round runs every write once as the current token, naming named (or no
+	// one when empty), and checks each lands with want as its actor.
+	round := func(n int, named, want string) {
+		t.Helper()
+		for _, w := range writes {
+			body := w.body(n)
+			if named != "" {
+				body["actor"] = named
+			}
+			resp := e.do(w.method, w.path, body, nil)
+			if resp.StatusCode/100 != 2 {
+				t.Fatalf("round %d %s naming %q = %d", n, w.name, named, resp.StatusCode)
+			}
+			events := newEvents()
+			if len(events) == 0 {
+				t.Fatalf("round %d %s recorded no event", n, w.name)
+			}
+			for _, ev := range events {
+				if ev.Actor != want {
+					t.Errorf("round %d %s: event %s actor = %q, want %q", n, w.name, ev.Action, ev.Actor, want)
+				}
+			}
+		}
+	}
+
+	// Off by default: an agent token may name anyone.
+	round(0, "alice", "alice")
+
+	if err := e.store.SetSetting("actor_from_token", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	// On: an agent token naming someone else is refused before anything is
+	// written, with the rule in the message.
+	for _, w := range writes {
+		body := w.body(1)
+		body["actor"] = "alice"
+		got := e.expectError(w.method, w.path, body, http.StatusForbidden, codeForbidden)
+		if !strings.Contains(got.Error, "actor_from_token") {
+			t.Errorf("%s message = %q, want the setting named", w.name, got.Error)
+		}
+	}
+	if events := newEvents(); len(events) != 0 {
+		t.Fatalf("refused writes recorded %d events: %+v", len(events), events)
+	}
+
+	// A batch item gets the same refusal as its own PATCH would.
+	var batch issueBatchResponse
+	e.expect("PATCH", "/api/v1/issues", map[string]any{"updates": []map[string]any{
+		{"key": "TSK-2", "title": "batched", "actor": "alice"},
+		{"key": "TSK-3", "title": "batched"},
+	}}, http.StatusOK, &batch)
+	if r := batch.Results[0]; r.OK || r.Status != http.StatusForbidden || r.Code != codeForbidden {
+		t.Errorf("batch item naming another actor = %+v, want 403 forbidden", r)
+	}
+	if r := batch.Results[1]; !r.OK {
+		t.Errorf("batch item naming no one = %+v, want ok", r)
+	}
+	for _, ev := range newEvents() {
+		if ev.Actor != "pm" || ev.EntityKey != "TSK-3" {
+			t.Errorf("batch event = %+v, want pm on TSK-3 only", ev)
+		}
+	}
+
+	// On: an agent naming itself, or no one, writes as itself.
+	round(2, "pm", "pm")
+	round(3, "", "pm")
+
+	// On: an admin token may still name anyone.
+	e.withToken(admin, func() { round(4, "alice", "alice") })
+}
+
 func TestLabelOperations(t *testing.T) {
 	e := newTestEnv(t)
 	if err := e.store.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
@@ -1101,6 +1226,7 @@ func TestClassifyErrors(t *testing.T) {
 		{"busy", fmt.Errorf("x: %w", store.ErrBusy), http.StatusServiceUnavailable, codeBusy},
 		{"integrity", fmt.Errorf("x: %w", store.ErrIntegrity), http.StatusInternalServerError, codeInternal},
 		{"filesystem", &os.PathError{Op: "open", Path: "/nope", Err: errors.New("no such file")}, http.StatusInternalServerError, codeInternal},
+		{"actor not self", errActorNotSelf, http.StatusForbidden, codeForbidden},
 		{"plain validation", errors.New("priority 9 out of range 0-4"), http.StatusBadRequest, codeValidation},
 		{"request context gone", fmt.Errorf("list: %w", context.Canceled), http.StatusInternalServerError, codeInternal},
 		{"transaction gone", fmt.Errorf("update: %w", sql.ErrTxDone), http.StatusInternalServerError, codeInternal},

@@ -26,6 +26,7 @@ var SettingSpecs = []SettingSpec{
 	{Key: "base_url", Description: "public URL of the server, used to fill each issue's url field; empty leaves it out"},
 	{Key: "agent_label", Description: "label auto-applied to issues created by non-admin tokens; empty disables it"},
 	{Key: "workspace_name", Description: "name shown in the web board header; empty (or \"trackd\") shows just the wordmark"},
+	{Key: "actor_from_token", Description: "true attributes every write to the token that made it: only an admin token may name another actor; false (the default) lets any token name one"},
 }
 
 // SettingValue is one row of `trackd setting list`.
@@ -106,6 +107,10 @@ func ValidateSetting(key, value string) error {
 		if len(value) > 100 {
 			return fmt.Errorf("workspace_name must be 100 bytes or fewer, got %d", len(value))
 		}
+	case "actor_from_token":
+		if value != "true" && value != "false" {
+			return fmt.Errorf("actor_from_token must be true or false, got %q", value)
+		}
 	}
 	return nil
 }
@@ -148,6 +153,9 @@ func (s *Store) ListSettings() ([]SettingValue, error) {
 		}
 		if spec.Key == "issue_prefix" && v == "" {
 			v = "TSK"
+		}
+		if spec.Key == "actor_from_token" && v == "" {
+			v = "false"
 		}
 		out = append(out, SettingValue{Key: spec.Key, Value: v, Description: spec.Description, ReadOnly: spec.ReadOnly})
 	}

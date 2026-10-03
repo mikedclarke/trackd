@@ -286,11 +286,8 @@ func toMCPEvents(events []store.Event) ([]mcpEvent, error) {
 
 func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "trackd", Title: "trackd", Version: s.version}, nil)
-	resolve := func(explicit string) string {
-		if explicit != "" {
-			return explicit
-		}
-		return tokenActor
+	resolve := func(explicit string) (string, error) {
+		return s.resolveActor(tokenActor, role, explicit)
 	}
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -360,7 +357,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		Description: "Create an issue with mode create (title required, key rejected) or change one with mode update (key required); only the fields you pass change, descriptions are append-only unless replace_description is set (which needs an admin token), and every label name must already exist.",
 		InputSchema: enumSchema[mcpSaveIssueIn](map[string][]any{"mode": {"create", "update"}}),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveIssueIn) (*mcp.CallToolResult, store.Issue, error) {
-		act := resolve(in.Actor)
+		act, err := resolve(in.Actor)
+		if err != nil {
+			return nil, store.Issue{}, mcpError(err)
+		}
 		labels, err := mcpLabels(in.Labels, in.ClearLabels)
 		if err != nil {
 			return nil, store.Issue{}, mcpError(err)
@@ -452,11 +452,15 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		Annotations: writeTool(false),
 		Description: "Add a comment to an issue, optionally as a reply to another comment on the same issue.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpAddCommentIn) (*mcp.CallToolResult, store.Comment, error) {
+		act, err := resolve(in.Actor)
+		if err != nil {
+			return nil, store.Comment{}, mcpError(err)
+		}
 		comment, _, err := s.store.AddComment(in.Key, store.CommentInput{
 			Body:           in.Body,
 			ParentID:       in.ParentID,
 			IdempotencyKey: in.IdempotencyKey,
-		}, resolve(in.Actor))
+		}, act)
 		if err != nil {
 			return nil, store.Comment{}, mcpError(err)
 		}
@@ -483,7 +487,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		Annotations: writeTool(true),
 		Description: "Create a project (omit slug, pass name) or change one (pass slug), where status is one of backlog, planned, started, paused, completed or canceled and only the fields you pass change.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveProjectIn) (*mcp.CallToolResult, store.Project, error) {
-		act := resolve(in.Actor)
+		act, err := resolve(in.Actor)
+		if err != nil {
+			return nil, store.Project{}, mcpError(err)
+		}
 		labels, err := mcpLabels(in.Labels, in.ClearLabels)
 		if err != nil {
 			return nil, store.Project{}, mcpError(err)
@@ -539,7 +546,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		Annotations: writeTool(true),
 		Description: "Create a milestone (omit id, pass project and name) or change one (pass id), where only the fields you pass change.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveMilestoneIn) (*mcp.CallToolResult, store.Milestone, error) {
-		act := resolve(in.Actor)
+		act, err := resolve(in.Actor)
+		if err != nil {
+			return nil, store.Milestone{}, mcpError(err)
+		}
 		if in.ID == 0 {
 			milestone, err := s.store.CreateMilestone(store.MilestoneInput{
 				Project:     in.Project,
@@ -570,9 +580,11 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		Description: "Link two issues with a relation of type blocks, relates or duplicate, or unlink them by passing remove. Unlinking is idempotent: removed reports whether there was a relation there.",
 		InputSchema: enumSchema[mcpSaveRelationIn](map[string][]any{"type": {"blocks", "relates", "duplicate"}}),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveRelationIn) (*mcp.CallToolResult, mcpRelationsOut, error) {
-		act := resolve(in.Actor)
+		act, err := resolve(in.Actor)
+		if err != nil {
+			return nil, mcpRelationsOut{}, mcpError(err)
+		}
 		var removed *bool
-		var err error
 		if in.Remove {
 			var gone bool
 			gone, err = s.store.RemoveRelation(in.Key, in.Related, in.Type, act)
@@ -641,7 +653,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 		Description: "Create a saved view with mode create (name and filter required) or change one with mode update (name required; filter and quick_actions are replaced whole; only the owner or an admin may change a view). A view is a named issue filter anyone can open by name, with optional quick actions offered on each of its rows in the web board.",
 		InputSchema: enumSchema[mcpSaveViewIn](map[string][]any{"mode": {"create", "update"}}),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveViewIn) (*mcp.CallToolResult, store.View, error) {
-		act := resolve(in.Actor)
+		act, err := resolve(in.Actor)
+		if err != nil {
+			return nil, store.View{}, mcpError(err)
+		}
 		switch in.Mode {
 		case "create":
 			if in.Filter == nil {

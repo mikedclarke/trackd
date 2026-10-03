@@ -28,7 +28,8 @@ has to make the mistakes harmless.
   round trip, so nothing is locked in.
 - **Every write has a name on it.** Each agent gets its own API token, and
   every comment and audit event is attributed to it automatically. "Which agent
-  did this" always has an answer.
+  did this" always has an answer, and with the `actor_from_token` setting on,
+  only an admin token can put any other name on a write.
 - **Safe to retry.** Creates take an idempotency key, updates take an expected
   version, every error carries a machine-readable code and the CLI maps them to
   stable exit codes. Unknown JSON fields and unknown query parameters are

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -299,6 +300,117 @@ func TestMCPAgentLabelAutoApply(t *testing.T) {
 	if len(adminIssue.Labels) != 0 {
 		t.Fatalf("admin create = %v, want no label", adminIssue.Labels)
 	}
+}
+
+// actor_from_token holds on the MCP tools as on REST: with it on, an agent
+// token naming another actor is refused with [forbidden] and nothing is
+// written, while naming itself, naming no one, or an admin naming anyone
+// still works. Off, any token may name any actor.
+func TestMCPActorFromToken(t *testing.T) {
+	session, st := newMCPSession(t) // agent token "pm"
+	admin := mcpSessionAs(t, st, "owner", "admin")
+	for i := 1; i <= 7; i++ {
+		callTool(t, session, "save_issue", map[string]any{"mode": "create", "title": fmt.Sprintf("seed %d", i)}, nil)
+	}
+	var project store.Project
+	callTool(t, session, "save_project", map[string]any{"name": "Plan"}, &project)
+	var milestone store.Milestone
+	callTool(t, session, "save_milestone", map[string]any{"project": project.Slug, "name": "Seed"}, &milestone)
+	callTool(t, session, "save_view", map[string]any{"mode": "create", "name": "seed", "filter": map[string]any{"statuses": []string{"Todo"}}}, nil)
+
+	writes := []struct {
+		name, tool string
+		args       func(round int) map[string]any
+	}{
+		{"create issue", "save_issue", func(n int) map[string]any {
+			return map[string]any{"mode": "create", "title": fmt.Sprintf("made %d", n)}
+		}},
+		{"update issue", "save_issue", func(n int) map[string]any {
+			return map[string]any{"mode": "update", "key": "TSK-1", "title": fmt.Sprintf("renamed %d", n)}
+		}},
+		{"append description", "save_issue", func(n int) map[string]any {
+			return map[string]any{"mode": "update", "key": "TSK-1", "append_description": fmt.Sprintf("note %d", n)}
+		}},
+		{"add comment", "add_comment", func(n int) map[string]any {
+			return map[string]any{"key": "TSK-1", "body": fmt.Sprintf("comment %d", n)}
+		}},
+		{"add relation", "save_relation", func(n int) map[string]any {
+			return map[string]any{"key": "TSK-1", "related": fmt.Sprintf("TSK-%d", n+2), "type": "relates"}
+		}},
+		{"create project", "save_project", func(n int) map[string]any { return map[string]any{"name": fmt.Sprintf("Project %d", n)} }},
+		{"update project", "save_project", func(n int) map[string]any {
+			return map[string]any{"slug": project.Slug, "description": fmt.Sprintf("about %d", n)}
+		}},
+		{"create milestone", "save_milestone", func(n int) map[string]any {
+			return map[string]any{"project": project.Slug, "name": fmt.Sprintf("M%d", n)}
+		}},
+		{"update milestone", "save_milestone", func(n int) map[string]any {
+			return map[string]any{"id": milestone.ID, "description": fmt.Sprintf("about %d", n)}
+		}},
+		{"create view", "save_view", func(n int) map[string]any {
+			return map[string]any{"mode": "create", "name": fmt.Sprintf("view %d", n), "filter": map[string]any{"statuses": []string{"Todo"}}}
+		}},
+		{"update view", "save_view", func(n int) map[string]any {
+			return map[string]any{"mode": "update", "name": "seed", "description": fmt.Sprintf("about %d", n)}
+		}},
+	}
+
+	var last int64
+	newEvents := func() []store.Event {
+		t.Helper()
+		events, err := st.ListAllEvents(store.EventFilter{AfterID: last, Limit: 500})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(events); n > 0 {
+			last = events[n-1].ID
+		}
+		return events
+	}
+	newEvents()
+
+	round := func(s *mcp.ClientSession, n int, named, want string) {
+		t.Helper()
+		for _, w := range writes {
+			args := w.args(n)
+			if named != "" {
+				args["actor"] = named
+			}
+			if res := callTool(t, s, w.tool, args, nil); res.IsError {
+				t.Fatalf("round %d %s naming %q failed: %+v", n, w.name, named, res.Content)
+			}
+			events := newEvents()
+			if len(events) == 0 {
+				t.Fatalf("round %d %s recorded no event", n, w.name)
+			}
+			for _, ev := range events {
+				if ev.Actor != want {
+					t.Errorf("round %d %s: event %s actor = %q, want %q", n, w.name, ev.Action, ev.Actor, want)
+				}
+			}
+		}
+	}
+
+	// Off by default: an agent token may name anyone.
+	round(session, 0, "alice", "alice")
+
+	if err := st.SetSetting("actor_from_token", "true"); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range writes {
+		args := w.args(1)
+		args["actor"] = "alice"
+		if msg := callErr(t, session, w.tool, args); !strings.Contains(msg, "[forbidden]") || !strings.Contains(msg, "actor_from_token") {
+			t.Errorf("%s naming another actor = %q, want [forbidden] naming the setting", w.name, msg)
+		}
+	}
+	if events := newEvents(); len(events) != 0 {
+		t.Fatalf("refused writes recorded %d events: %+v", len(events), events)
+	}
+
+	round(session, 2, "pm", "pm")
+	round(session, 3, "", "pm")
+	round(admin, 4, "alice", "alice")
 }
 
 func TestMCPSaveIssueMode(t *testing.T) {

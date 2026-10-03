@@ -74,15 +74,24 @@ The data model and the rules trackd enforces on it. The README has the short ver
   `actor`. Roles: `agent` (the default) or `admin`. Every write is open to both
   except one: replacing or clearing a description, which needs `admin`. Give the
   agents `agent` tokens and keep an `admin` token for yourself.
+  By default any token may name any `actor`, which suits one person running
+  several agents. When the name on a write has to be trusted, turn on
+  `actor_from_token` (below): an `agent` token may then only name itself (or
+  leave `actor` out), and a write naming anyone else is refused with a 403
+  (`forbidden`, CLI exit 4) on REST and MCP alike, before anything is written.
+  An `admin` token may still name anyone, for imports and corrections. The web
+  board always writes as the signed-in token.
 - **Settings** live in the database and are read and written with
-  `trackd setting list|get|set`. Five are writable: `issue_prefix` (the key
+  `trackd setting list|get|set`. Six are writable: `issue_prefix` (the key
   prefix for new issues, `TSK` by default; existing keys keep theirs),
   `label_groups` (the exclusive groups above), `base_url` (the server's
   public URL, used to fill each issue's `url` field for links in agent output),
   `agent_label` (a label auto-applied to issues created by non-admin tokens;
-  empty by default, which disables it) and `workspace_name` (the name shown in
-  the web board header; empty shows just the wordmark). A sixth, `issue_seq`
-  (the last issue number handed out), is read-only.
+  empty by default, which disables it), `workspace_name` (the name shown in
+  the web board header; empty shows just the wordmark) and `actor_from_token`
+  (`true` or `false`, `false` by default: when `true`, only an `admin` token may
+  name an `actor` other than itself). A seventh, `issue_seq` (the last issue
+  number handed out), is read-only.
   Every change is audited. `set` writes to the database file directly, so it
   refuses while a server is running: stop the server, set, start it again.
 
