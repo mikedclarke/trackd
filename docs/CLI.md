@@ -150,6 +150,22 @@ Server maintenance commands (`serve`, `token`, `setting`, `backup`, `restore`,
 `export`, `import`) operate on the database file directly. They take `--db`, or
 `$TRACKD_DB`, and fall back to `./trackd.db`.
 
+## Service (macOS)
+
+`trackd service <status|start|stop|restart|install|uninstall>` manages the
+launchd job that runs `serve`, in the logged-in user's domain (`gui/<uid>`).
+The job label comes from `--label`, then `$TRACKD_SERVICE_LABEL`; with neither
+the command exits 2. On any other platform it exits 1 and points at systemd.
+
+| Subcommand | Does | Flags |
+|---|---|---|
+| `status` | one line: launchd state, pid and runs, then a `/healthz` probe (no token, one attempt). Exits 0 when the job is running and the server answers ok, 6 otherwise | `--url` (default `$TRACKD_URL`, then `http://127.0.0.1:8484`), `--json` |
+| `start` | loads the plist when the job is not loaded, kicks it when it is loaded but idle, does nothing when it is running | |
+| `stop` | unloads the job (`launchctl bootout`); the plist stays | |
+| `restart` | `launchctl kickstart -k`; a job that is not loaded is started instead | |
+| `install` | writes `~/Library/LaunchAgents/<label>.plist` and loads it; refuses when that file exists | `--db`, `--addr`, `--backup-dir`, `--log`, `--bin`, `--dry-run` |
+| `uninstall` | unloads the job and removes the plist; the database and log are untouched | |
+
 ## Settings
 
 ```sh

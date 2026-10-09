@@ -74,6 +74,8 @@ func run(args []string) error {
 		return cmdToken(rest)
 	case "setting":
 		return cmdSetting(rest)
+	case "service":
+		return cmdService(rest)
 	case "backup":
 		return cmdBackup(rest)
 	case "restore":
@@ -433,6 +435,9 @@ Server commands (operate on the database file directly):
   restore   restore a snapshot to a new database file  (--db)
   export    dump the full database as JSONL            (--db, --out)
   import    load a dump into a new database            (--db) <format> <file>
+
+Service commands (macOS: the launchd job that runs serve; --label or $TRACKD_SERVICE_LABEL):
+  service   status | start | stop | restart | install | uninstall
 
 Client commands (talk to a running server; --url/--token or $TRACKD_URL/$TRACKD_TOKEN):
   issue     list | show | create | update | append | comment | relate | events

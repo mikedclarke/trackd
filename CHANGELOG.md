@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `trackd service <status|start|stop|restart|install|uninstall>` manages the
+  launchd job that runs `serve` on macOS. The job label comes from `--label` or
+  `$TRACKD_SERVICE_LABEL`, never a built-in default. `status` puts launchd's
+  state next to a `/healthz` probe and exits 0 only when both are fine, 6
+  otherwise; `install` writes and loads the plist (with `--dry-run` to print it
+  first) and never overwrites an existing one; `stop` unloads the job, since
+  launchd respawns a killed one. The commands only wrap `launchctl` in the
+  user's own session.
+
 ## [0.5.0] - 2026-10-03
 
 ### Added

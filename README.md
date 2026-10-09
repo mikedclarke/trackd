@@ -234,8 +234,32 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-launchd (macOS), as `~/Library/LaunchAgents/com.example.trackd.plist`, then
-`launchctl load` it:
+launchd (macOS): `trackd service` writes the job, loads it and runs it for you.
+It names the job by a label you choose, from `--label` or
+`$TRACKD_SERVICE_LABEL`:
+
+```sh
+export TRACKD_SERVICE_LABEL=com.example.trackd    # e.g. in your shell profile
+trackd service install --db ~/trackd/trackd.db --backup-dir ~/trackd/backups --dry-run   # print the plist, change nothing
+trackd service install --db ~/trackd/trackd.db --backup-dir ~/trackd/backups
+trackd service status     # launchd's view and a /healthz probe in one line; exit 0 only when both are fine
+trackd service restart    # after swapping the binary: kill and respawn (a job that is not loaded is started)
+trackd service stop       # unload the job (killing it would not do: launchd respawns it); start loads it again
+trackd service start
+trackd service uninstall  # unload and remove the plist; the database and log stay
+```
+
+`install` refuses when a plist with that label already exists, so it never
+overwrites one you wrote by hand; `uninstall` first if you mean to replace it.
+The plist runs the binary you ran `install` with (or `--bin`), resolved past
+symlinks, with `--addr` (default `:8484`) and the log next to the database
+(or `--log`). The commands only wrap `launchctl` in your own login session
+(`gui/<uid>`), so they need nothing beyond what you could type yourself, and
+a sandbox that blocks `launchctl` blocks them too.
+
+The plist `install` writes, if you would rather write it yourself as
+`~/Library/LaunchAgents/com.example.trackd.plist` and load it with
+`launchctl bootstrap gui/$(id -u) <plist>`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
