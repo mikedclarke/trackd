@@ -25,19 +25,25 @@ func main() {
 	if err == nil {
 		return
 	}
-	// --json callers parse stdout, so the machine-readable error goes there and
-	// the human line to stderr. A help request is not a failure: the flag
-	// package has already printed the usage, so neither the JSON error object
-	// nor the stderr line is added for it. A batch with refused items has
-	// already printed its results, errors included, as the one JSON document.
+	printError(os.Args[1:], err)
+	os.Exit(exitCode(err))
+}
+
+// printError reports a failed command. --json callers parse stdout, so the
+// machine-readable error goes there and the human line to stderr. A help
+// request is not a failure: the flag package has already printed the usage,
+// so neither the JSON error object nor the stderr line is added for it. A
+// batch with refused items, or a report that failed its check, has already
+// printed the one JSON document, so only the stderr line is added.
+func printError(args []string, err error) {
 	var batch *batchError
-	if wantsJSON(os.Args[1:]) && !errors.Is(err, flag.ErrHelp) && !errors.As(err, &batch) {
+	var reported *reportedError
+	if wantsJSON(args) && !errors.Is(err, flag.ErrHelp) && !errors.As(err, &batch) && !errors.As(err, &reported) {
 		_ = printJSON(errorObject(err))
 	}
 	if !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintln(os.Stderr, "trackd:", err)
 	}
-	os.Exit(exitCode(err))
 }
 
 func run(args []string) error {

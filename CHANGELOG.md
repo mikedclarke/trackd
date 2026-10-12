@@ -14,9 +14,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `$TRACKD_SERVICE_LABEL`, never a built-in default. `status` puts launchd's
   state next to a `/healthz` probe and exits 0 only when both are fine, 6
   otherwise; `install` writes and loads the plist (with `--dry-run` to print it
-  first) and never overwrites an existing one; `stop` unloads the job, since
-  launchd respawns a killed one. The commands only wrap `launchctl` in the
-  user's own session.
+  first), never overwrites an existing one and refuses when the database's or
+  the log's folder is missing; `stop` unloads the job, since launchd respawns a
+  killed one. The commands only wrap `launchctl` in the user's own session.
+
+### Fixed
+
+- `trackd health --json` on a degraded server printed the report and then an
+  error object, so stdout was not one JSON document; it now prints the report
+  alone and still exits 6.
 
 ## [0.5.0] - 2026-10-03
 

@@ -251,6 +251,8 @@ trackd service uninstall  # unload and remove the plist; the database and log st
 
 `install` refuses when a plist with that label already exists, so it never
 overwrites one you wrote by hand; `uninstall` first if you mean to replace it.
+It also refuses when the database's or the log's folder does not exist, since
+launchd would fail to open the log and the job would die at every spawn.
 The plist runs the binary you ran `install` with (or `--bin`), resolved past
 symlinks, with `--addr` (default `:8484`) and the log next to the database
 (or `--log`). The commands only wrap `launchctl` in your own login session
@@ -272,6 +274,7 @@ The plist `install` writes, if you would rather write it yourself as
     <string>/usr/local/bin/trackd</string>
     <string>serve</string>
     <string>--db</string><string>/Users/you/trackd/trackd.db</string>
+    <string>--addr</string><string>:8484</string>
     <string>--backup-dir</string><string>/Users/you/trackd/backups</string>
   </array>
   <key>KeepAlive</key><true/>

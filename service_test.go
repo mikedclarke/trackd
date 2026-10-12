@@ -37,9 +37,10 @@ const waitingPrint = `gui/501/com.example.trackd = {
 // fakeLaunchd stands in for launchctl: print answers from loaded and state,
 // every other call is recorded so a test can check the exact lines run.
 type fakeLaunchd struct {
-	loaded bool
-	print  string
-	calls  []string
+	loaded   bool
+	print    string
+	printErr string // when set, print fails with this, as a sandboxed launchctl does
+	calls    []string
 }
 
 // stubService pins the platform, points HOME at a temp dir, sets the label
@@ -55,6 +56,9 @@ func stubService(t *testing.T, f *fakeLaunchd) string {
 	serviceOS = "darwin"
 	launchctl = func(args ...string) (string, error) {
 		if args[0] == "print" {
+			if f.printErr != "" {
+				return f.printErr + "\n", errors.New("launchctl print: " + f.printErr)
+			}
 			if !f.loaded {
 				return "Bad request.\nCould not find service \"com.example.trackd\" in domain for user gui: 501\n", errors.New("exit status 113")
 			}
@@ -123,6 +127,13 @@ func TestServiceRefusesOtherPlatforms(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Errorf("launchctl ran on linux: %v", f.calls)
+	}
+	// The platform is checked before the label, so a missing label on Linux
+	// still exits 1 with the macOS-only message, as docs/CLI.md says.
+	t.Setenv("TRACKD_SERVICE_LABEL", "")
+	err = run([]string{"service", "status"})
+	if exitCode(err) != 1 || !strings.Contains(err.Error(), "macOS only") {
+		t.Errorf("no label on linux: exit %d (%v), want 1", exitCode(err), err)
 	}
 }
 
@@ -206,6 +217,24 @@ func TestServiceInstall(t *testing.T) {
 	db := filepath.Join(dir, "a&b", "trackd.db")
 	args := []string{"service", "install", "--bin", link, "--db", db, "--backup-dir", filepath.Join(dir, "backups")}
 
+	// A missing database or log folder is refused before anything is written,
+	// dry run included: launchd could not open the log and the job would die.
+	for _, extra := range [][]string{nil, {"--dry-run"}, {"--log", filepath.Join(dir, "nowhere", "trackd.log")}} {
+		if extra != nil && extra[0] == "--log" {
+			if err := os.MkdirAll(filepath.Dir(db), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var err error
+		out := captureStdout(t, func() { err = run(append(append([]string{}, args...), extra...)) })
+		if exitCode(err) != 2 || !strings.Contains(err.Error(), "is not an existing folder") {
+			t.Errorf("%v: exit %d (%v), want 2 naming the folder", extra, exitCode(err), err)
+		}
+		if _, serr := os.Stat(plist); !errors.Is(serr, os.ErrNotExist) || len(f.calls) != 0 || out != "" {
+			t.Fatalf("%v: refused install changed something: stat %v, calls %v, out %q", extra, serr, f.calls, out)
+		}
+	}
+
 	// A dry run prints the plist and touches nothing.
 	out := captureStdout(t, func() {
 		if err := run(append(args, "--dry-run")); err != nil {
@@ -272,6 +301,10 @@ func TestServiceStatus(t *testing.T) {
 	defer degraded.Close()
 	gone := httptest.NewServer(http.NotFoundHandler())
 	gone.Close()
+	notTrackd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("hello from something else"))
+	}))
+	defer notTrackd.Close()
 
 	cases := []struct {
 		name     string
@@ -285,6 +318,7 @@ func TestServiceStatus(t *testing.T) {
 		{"running but degraded", true, runningPrint, degraded.URL, 6, "server degraded"},
 		{"loaded but not running", true, waitingPrint, gone.URL, 6, "not running; server unreachable"},
 		{"healthy server, job not loaded", false, "", healthy.URL, 6, "not loaded (run: trackd service start)"},
+		{"something else answers", true, runningPrint, notTrackd.URL, 6, "server answered 200 without a health report (not trackd?)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -319,4 +353,90 @@ func TestServiceStatus(t *testing.T) {
 			t.Errorf("health %v", r["health"])
 		}
 	})
+
+	// A launchctl that fails still leaves the probe to run and report.
+	t.Run("launchctl fails", func(t *testing.T) {
+		stubService(t, &fakeLaunchd{printErr: "Operation not permitted"})
+		var err error
+		out := captureStdout(t, func() { err = run([]string{"service", "status", "--url", healthy.URL}) })
+		if exitCode(err) != 6 {
+			t.Errorf("exit %d (%v), want 6", exitCode(err), err)
+		}
+		if !strings.Contains(out, "state unknown (launchctl print: Operation not permitted); server ok, version 9.9.9") {
+			t.Errorf("line %q", out)
+		}
+	})
+}
+
+// failedJSON runs a command with --json that fails its check and returns what
+// the CLI as a whole puts on stdout: the command's output and main's error
+// report together.
+func failedJSON(t *testing.T, args []string) (string, int) {
+	t.Helper()
+	savedErr := os.Stderr
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	os.Stderr = devnull
+	defer func() { os.Stderr = savedErr }()
+	var runErr error
+	out := captureStdout(t, func() {
+		if runErr = run(args); runErr != nil {
+			printError(args, runErr)
+		}
+	})
+	return out, exitCode(runErr)
+}
+
+// A check that fails after printing its --json report must leave stdout one
+// JSON document: a script parsing it would break on a second error object.
+func TestFailedCheckPrintsOneJSONDocument(t *testing.T) {
+	degraded := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"degraded","version":"9.9.9"}`))
+	}))
+	defer degraded.Close()
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+
+	cases := []struct {
+		name  string
+		f     *fakeLaunchd
+		args  []string
+		check func(map[string]any) bool
+	}{
+		{"service down", &fakeLaunchd{}, []string{"service", "status", "--json", "--url", gone.URL},
+			func(r map[string]any) bool { return r["loaded"] == false && r["health_error"] != nil }},
+		{"launchctl fails", &fakeLaunchd{printErr: "Operation not permitted"}, []string{"service", "status", "--json", "--url", degraded.URL},
+			func(r map[string]any) bool { return r["launchd_error"] != nil && r["health"] != nil }},
+		{"health degraded", nil, []string{"health", "--json", "--url", degraded.URL, "--token", "td_test"},
+			func(r map[string]any) bool { return r["status"] == "degraded" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.f != nil {
+				stubService(t, tc.f)
+			}
+			out, code := failedJSON(t, tc.args)
+			if code != 6 {
+				t.Errorf("exit %d, want 6", code)
+			}
+			var r map[string]any
+			if err := json.Unmarshal([]byte(out), &r); err != nil {
+				t.Fatalf("stdout is not one JSON document (%v):\n%s", err, out)
+			}
+			if !tc.check(r) {
+				t.Errorf("report %v", r)
+			}
+		})
+	}
+
+	// An error with no report of its own still gets the JSON error object.
+	out, code := failedJSON(t, []string{"health", "--json", "--url", gone.URL, "--token", "td_test"})
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(out), &obj); err != nil || obj["code"] != "unreachable" || code != 6 {
+		t.Errorf("unreachable health: exit %d, stdout %q (%v)", code, out, err)
+	}
 }

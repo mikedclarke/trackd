@@ -163,7 +163,7 @@ the command exits 2. On any other platform it exits 1 and points at systemd.
 | `start` | loads the plist when the job is not loaded, kicks it when it is loaded but idle, does nothing when it is running | |
 | `stop` | unloads the job (`launchctl bootout`); the plist stays | |
 | `restart` | `launchctl kickstart -k`; a job that is not loaded is started instead | |
-| `install` | writes `~/Library/LaunchAgents/<label>.plist` and loads it; refuses when that file exists | `--db`, `--addr`, `--backup-dir`, `--log`, `--bin`, `--dry-run` |
+| `install` | writes `~/Library/LaunchAgents/<label>.plist` and loads it; refuses when that file exists, or when the database's or the log's folder does not (exit 2) | `--db`, `--addr`, `--backup-dir`, `--log`, `--bin`, `--dry-run` |
 | `uninstall` | unloads the job and removes the plist; the database and log are untouched | |
 
 ## Settings

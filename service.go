@@ -144,14 +144,14 @@ func cmdService(args []string) error {
 	if fs.NArg() != 0 {
 		return usagef("usage: trackd service %s [flags]", sub)
 	}
+	if serviceOS != "darwin" {
+		return fmt.Errorf("trackd service manages a launchd job, so it runs on macOS only; on Linux use systemctl (README, Running as a service)")
+	}
 	if *label == "" {
 		return usagef("no launchd label: pass --label or set $TRACKD_SERVICE_LABEL (for example com.example.trackd)")
 	}
 	if !serviceLabelRe.MatchString(*label) {
 		return usagef("launchd label %q may hold only letters, digits, dots, dashes and underscores", *label)
-	}
-	if serviceOS != "darwin" {
-		return fmt.Errorf("trackd service manages a launchd job, so it runs on macOS only; on Linux use systemctl (README, Running as a service)")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -188,6 +188,7 @@ type statusReport struct {
 	PID            int            `json:"pid,omitempty"`
 	Runs           int            `json:"runs,omitempty"`
 	LastExitReason string         `json:"last_exit_reason,omitempty"`
+	LaunchdError   string         `json:"launchd_error,omitempty"`
 	URL            string         `json:"url"`
 	Health         map[string]any `json:"health,omitempty"`
 	HealthError    string         `json:"health_error,omitempty"`
@@ -202,10 +203,9 @@ func serviceStatus(job launchdJob, url string, jsonOut bool) error {
 	if err != nil {
 		return err
 	}
-	loaded, st, err := job.inspect()
-	if err != nil {
-		return err
-	}
+	// A launchctl that fails (a sandbox can block it) still leaves the probe
+	// worth running: the operator learns whether the server is up either way.
+	loaded, st, lerr := job.inspect()
 	if url == "" {
 		url = os.Getenv("TRACKD_URL")
 	}
@@ -215,6 +215,9 @@ func serviceStatus(job launchdJob, url string, jsonOut bool) error {
 	r := statusReport{
 		Label: job.label, Plist: job.plist, PlistExists: exists, Loaded: loaded,
 		State: st.state, PID: st.pid, Runs: st.runs, LastExitReason: st.lastExitReason, URL: url,
+	}
+	if lerr != nil {
+		r.LaunchdError = lerr.Error()
 	}
 	// /healthz needs no token, and one attempt is the honest probe: a status
 	// check that retried would hide a server that is flapping.
@@ -229,17 +232,22 @@ func serviceStatus(job launchdJob, url string, jsonOut bool) error {
 			return err
 		}
 	} else {
-		fmt.Println(statusLine(r, code))
+		fmt.Println(statusLine(r, code, herr))
+	}
+	if lerr != nil {
+		return &reportedError{&client.APIError{Status: 503, Code: "service_down", Message: "could not read the job's state: " + lerr.Error()}}
 	}
 	if r.State != "running" || herr != nil || code != 200 {
-		return &client.APIError{Status: 503, Code: "service_down", Message: job.label + " is not running and healthy"}
+		return &reportedError{&client.APIError{Status: 503, Code: "service_down", Message: job.label + " is not running and healthy"}}
 	}
 	return nil
 }
 
-func statusLine(r statusReport, healthCode int) string {
+func statusLine(r statusReport, healthCode int, herr error) string {
 	var job string
 	switch {
+	case r.LaunchdError != "":
+		job = "state unknown (" + r.LaunchdError + ")"
 	case !r.Loaded && !r.PlistExists:
 		job = "not installed (run: trackd service install)"
 	case !r.Loaded:
@@ -252,10 +260,17 @@ func statusLine(r statusReport, healthCode int) string {
 			job += ", last exit " + r.LastExitReason
 		}
 	}
+	// Only a failure to connect is "unreachable": an answer that is not a
+	// health report means something is listening, possibly not trackd.
 	var server string
+	var transport *client.TransportError
 	switch {
-	case r.HealthError != "":
+	case errors.As(herr, &transport):
 		server = "server unreachable at " + r.URL
+	case herr != nil && healthCode != 0:
+		server = fmt.Sprintf("server answered %d without a health report (not trackd?) at %s", healthCode, r.URL)
+	case herr != nil:
+		server = "server probe failed at " + r.URL + ": " + r.HealthError
 	default:
 		status, _ := r.Health["status"].(string)
 		if status == "" {
@@ -366,6 +381,14 @@ func serviceInstall(job launchdJob, db, addr, backupDir, logPath, bin string, dr
 	if logPath, err = filepath.Abs(logPath); err != nil {
 		return err
 	}
+	// launchd opens the log before trackd runs, so a missing folder would kill
+	// the job at every spawn with nothing written to say why.
+	if err := requireDir(filepath.Dir(db), "--db"); err != nil {
+		return err
+	}
+	if err := requireDir(filepath.Dir(logPath), "--log"); err != nil {
+		return err
+	}
 	argv := []string{bin, "serve", "--db", db, "--addr", addr}
 	if backupDir != "" {
 		if backupDir, err = filepath.Abs(backupDir); err != nil {
@@ -398,6 +421,14 @@ func serviceInstall(job launchdJob, db, addr, backupDir, logPath, bin string, dr
 	}
 	fmt.Printf("installed and started %s (%s)\n", job.label, job.plist)
 	return nil
+}
+
+func requireDir(dir, flagName string) error {
+	fi, err := os.Stat(dir)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && !fi.IsDir()) {
+		return usagef("%s is not an existing folder: create it or fix %s", dir, flagName)
+	}
+	return err
 }
 
 // serviceUninstall unloads the job and removes its plist. The database, the

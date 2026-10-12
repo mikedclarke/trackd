@@ -1503,10 +1503,18 @@ func cmdHealth(args []string) error {
 	// A degraded server answers 503. The report is already printed; the exit
 	// code is what a monitor reads.
 	if status != 200 {
-		return &client.APIError{Status: status, Code: "degraded", Message: "server reports degraded health"}
+		return &reportedError{&client.APIError{Status: status, Code: "degraded", Message: "server reports degraded health"}}
 	}
 	return nil
 }
+
+// reportedError is a check that failed after its report was printed, --json
+// included, so main adds only the stderr line: a second JSON object would
+// leave stdout unparseable. It unwraps to the error that sets the exit code.
+type reportedError struct{ err error }
+
+func (e *reportedError) Error() string { return e.err.Error() }
+func (e *reportedError) Unwrap() error { return e.err }
 
 // printHealth is the human form of the report, one row per fact, in the order
 // an operator asks the questions. The report is a loose map, so every lookup
