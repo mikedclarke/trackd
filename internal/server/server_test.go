@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1285,6 +1286,43 @@ func TestBackupSkipsRecentSnapshot(t *testing.T) {
 	code, body := e.health()
 	if code != http.StatusOK || body.Backup.LastAt == "" {
 		t.Errorf("health after skip = %d %+v", code, body.Backup)
+	}
+}
+
+// A corrupt file with a snapshot name neither suppresses the startup backup
+// nor dates the last backup for /healthz.
+func TestBackupCorruptSnapshotDoesNotSeedHealth(t *testing.T) {
+	e := newTestEnv(t)
+	dir := t.TempDir()
+	junk := make([]byte, 8192)
+	if _, err := rand.Read(junk); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(dir, "trackd-"+time.Now().UTC().Format("20060102-150405")+"-9.db")
+	if err := os.WriteFile(corrupt, junk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go e.server.RunBackups(ctx, BackupConfig{Dir: dir, Every: time.Hour})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snapshots, err := filepath.Glob(filepath.Join(dir, "trackd-*.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshots) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			code, body := e.health()
+			t.Fatalf("no startup backup beside the corrupt file: %v; healthz %d %+v", snapshots, code, body.Backup)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(corrupt); err != nil {
+		t.Errorf("corrupt snapshot was removed: %v", err)
 	}
 }
 
