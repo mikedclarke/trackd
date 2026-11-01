@@ -181,7 +181,9 @@ a missing key can never turn an update into a new issue, and carries the same
 `append_description`, `add_labels`, `remove_labels`, `replace_description`
 (admin tokens only, as over REST), `expected_version` and `idempotency_key`
 fields as the API. The read tools are
-annotated read-only, and nothing in the tool set is destructive.
+annotated read-only, and nothing in the tool set is destructive. `save_issue`
+and `add_comment` are annotated as not idempotent: an unkeyed create, an
+`append_description` and a comment each add again when called twice.
 
 For Claude Code, add to `.mcp.json`:
 

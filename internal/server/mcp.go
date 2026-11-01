@@ -352,8 +352,10 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "save_issue",
-		Annotations: writeTool(true),
+		Name: "save_issue",
+		// Not idempotent: an unkeyed create and an append_description add
+		// each time they are called.
+		Annotations: writeTool(false),
 		Description: "Create an issue with mode create (title required, key rejected) or change one with mode update (key required); only the fields you pass change, descriptions are append-only unless replace_description is set (which needs an admin token), and every label name must already exist.",
 		InputSchema: enumSchema[mcpSaveIssueIn](map[string][]any{"mode": {"create", "update"}}),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpSaveIssueIn) (*mcp.CallToolResult, store.Issue, error) {

@@ -163,14 +163,17 @@ func TestMCPToolList(t *testing.T) {
 		}
 	}
 	// The save tools addressed by an identity are idempotent; a bare comment
-	// append is not.
-	for _, name := range []string{"save_issue", "save_project", "save_milestone", "save_relation"} {
+	// append is not, and neither is save_issue, whose unkeyed create and
+	// append_description add each call.
+	for _, name := range []string{"save_project", "save_milestone", "save_relation"} {
 		if !byName[name].Annotations.IdempotentHint {
 			t.Errorf("%s idempotentHint = false, want true", name)
 		}
 	}
-	if byName["add_comment"].Annotations.IdempotentHint {
-		t.Error("add_comment idempotentHint = true, want false")
+	for _, name := range []string{"save_issue", "add_comment"} {
+		if byName[name].Annotations.IdempotentHint {
+			t.Errorf("%s idempotentHint = true, want false", name)
+		}
 	}
 
 	// mode is a required enum on save_issue.
