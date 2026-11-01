@@ -2,7 +2,9 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +122,71 @@ func TestLabelColorValidation(t *testing.T) {
 	label, err := s.EnsureLabel("ready", "")
 	if err != nil || label.Color != "#f00" {
 		t.Errorf("label after a refused recolor = %+v, %v, want the old color kept", label, err)
+	}
+}
+
+// Setting up a group over data that already breaks it is refused, naming the
+// issues and projects that clash, archived ones included; nothing is written.
+func TestLabelGroupsSettingRefusesExistingConflict(t *testing.T) {
+	s := openTestStore(t)
+	mustLabel(t, s, "ready", "blocked", "docs")
+	issue := mustCreateIssue(t, s, IssueInput{Title: "Both", Labels: []string{"ready", "blocked"}}, "pm")
+	old := mustCreateIssue(t, s, IssueInput{Title: "Old", Labels: []string{"Ready", "blocked"}}, "pm")
+	archived := true
+	if _, err := s.UpdateIssue(old.Key, IssuePatch{Archived: &archived}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateIssue(t, s, IssueInput{Title: "One", Labels: []string{"ready", "docs"}}, "pm")
+	if _, err := s.CreateProject(ProjectInput{Name: "Docs Site", Labels: []string{"ready", "blocked"}}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.UpdateSetting("label_groups", `[["ready","blocked"]]`, "cli")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("UpdateSetting = %v, want ErrConflict", err)
+	}
+	for _, want := range []string{issue.Key, old.Key, "project docs-site"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "TSK-3") {
+		t.Errorf("error %q names an issue with one label of the group", err)
+	}
+	if v, err := s.Setting("label_groups"); err != nil || v != "" {
+		t.Errorf("label_groups after the refusal = %q, %v", v, err)
+	}
+	if events, err := s.ListEvents("setting", 0, 0); err != nil || len(events) != 0 {
+		t.Errorf("setting events after the refusal = %d, %v", len(events), err)
+	}
+
+	// A group that nothing breaks is still accepted.
+	if err := s.UpdateSetting("label_groups", `[["blocked","docs"]]`, "cli"); err != nil {
+		t.Fatalf("a group with no clash = %v", err)
+	}
+
+	// A clash that predates the group is left alone by an unrelated write.
+	if err := s.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.UpdateIssue(issue.Key, IssuePatch{AddLabels: []string{"docs"}}, "pm")
+	if err != nil {
+		t.Fatalf("an unrelated add on a clashing issue = %v", err)
+	}
+	if !slices.Equal(out.Labels, []string{"blocked", "docs", "ready"}) {
+		t.Errorf("labels = %v", out.Labels)
+	}
+}
+
+// A long list of clashes is cut short with a count of the rest.
+func TestLabelGroupsConflictListIsCapped(t *testing.T) {
+	s := openTestStore(t)
+	mustLabel(t, s, "ready", "blocked")
+	for i := range 23 {
+		mustCreateIssue(t, s, IssueInput{Title: fmt.Sprintf("Both %d", i), Labels: []string{"ready", "blocked"}}, "pm")
+	}
+	err := s.UpdateSetting("label_groups", `[["ready","blocked"]]`, "cli")
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "TSK-20 and 3 more") || strings.Contains(err.Error(), "TSK-21") {
+		t.Fatalf("UpdateSetting = %v, want the first 20 keys and 3 more", err)
 	}
 }

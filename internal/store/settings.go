@@ -137,6 +137,11 @@ func (s *Store) UpdateSetting(key, value, actor string) error {
 		); err != nil {
 			return err
 		}
+		if key == "label_groups" {
+			if err := checkLabelGroups(tx); err != nil {
+				return err
+			}
+		}
 		return recordEvent(tx, "setting", 0, actor, "setting.updated",
 			map[string]string{"key": key, "value": before},
 			map[string]string{"key": key, "value": value})

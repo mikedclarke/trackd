@@ -150,6 +150,30 @@ Server maintenance commands (`serve`, `token`, `setting`, `backup`, `restore`,
 `export`, `import`) operate on the database file directly. They take `--db`, or
 `$TRACKD_DB`, and fall back to `./trackd.db`.
 
+### Export and import
+
+```sh
+trackd export > dump.jsonl                  # or --out dump.jsonl
+trackd import --db new.db trackd dump.jsonl
+trackd import --db new.db --unverified trackd old-dump.jsonl
+```
+
+A dump is JSONL: a header line (`{"record":"trackd","version":3,"schema":N}`),
+one line per row, and a last line, the end record, holding the count of each
+record type and the sha256 of every byte before it
+(`{"record":"end","counts":{...},"sha256":"..."}`). `--out` writes to
+`<file>.partial` beside the target and gives it its name only once the dump is
+complete and synced; an existing file is never overwritten, and a failed export
+leaves no file behind.
+
+`import trackd` loads a dump into a new or empty database and checks it against
+its end record before anything is kept: a dump cut short, with a line missing
+or changed, or with anything after the end record is refused, and the database
+is left as it was. A dump written by trackd before 0.7.0 has no end record and
+is refused unless `--unverified` is passed; it then imports with a line on
+stderr saying its completeness could not be checked. A dump whose label
+memberships break its own `label_groups` is refused with exit 5.
+
 ## Service (macOS)
 
 `trackd service <status|start|stop|restart|install|uninstall>` manages the
@@ -178,6 +202,10 @@ trackd setting set agent_label source:agent  # auto-tag issues created by non-ad
 trackd setting set workspace_name "Acme Tasks"  # name shown in the web board header; empty shows just the wordmark
 trackd setting set actor_from_token true    # only admin tokens may pass --actor for someone else; false (the default) allows any
 ```
+
+Setting `label_groups` is refused with exit 5 when an issue or project already
+holds more than one label of a group (archived ones included); the error lists
+them, so their labels can be fixed first.
 
 With `actor_from_token` on, a client command run with an `agent` token and an `--actor` other than the token's own name fails with exit 4 and changes nothing; drop `--actor` (or pass the token's own name) and the write is attributed to the token.
 

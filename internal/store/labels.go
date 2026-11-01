@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -177,6 +178,73 @@ func labelGroups(tx *sql.Tx) ([][]string, error) {
 		return nil, fmt.Errorf("label_groups setting: %w", err)
 	}
 	return groups, nil
+}
+
+// checkLabelGroups refuses label groups that the stored memberships already
+// break. normalizeLabels only enforces a group on the label write itself, so
+// setting up a group and importing a dump are checked here instead.
+func checkLabelGroups(tx *sql.Tx) error {
+	groups, err := labelGroups(tx)
+	if err != nil {
+		return err
+	}
+	owners, err := groupConflicts(tx, groups)
+	if err != nil || len(owners) == 0 {
+		return err
+	}
+	const shown = 20
+	more := ""
+	if len(owners) > shown {
+		more = fmt.Sprintf(" and %d more", len(owners)-shown)
+		owners = owners[:shown]
+	}
+	return fmt.Errorf("label_groups: %s%s already hold more than one label of a group: %w", strings.Join(owners, ", "), more, ErrConflict)
+}
+
+// groupConflicts lists the issues (by key) and projects (as "project <slug>")
+// holding more than one label of any group. Archived rows count, because
+// unarchiving one would bring its clash back.
+func groupConflicts(tx *sql.Tx, groups [][]string) ([]string, error) {
+	var out []string
+	owners := []struct{ query, prefix string }{
+		{"SELECT i.key FROM issues i JOIN issue_labels il ON il.issue_id = i.id JOIN labels l ON l.id = il.label_id WHERE l.name COLLATE NOCASE IN (%s) GROUP BY i.id HAVING COUNT(*) > 1 ORDER BY i.id", ""},
+		{"SELECT p.slug FROM projects p JOIN project_labels pl ON pl.project_id = p.id JOIN labels l ON l.id = pl.label_id WHERE l.name COLLATE NOCASE IN (%s) GROUP BY p.id HAVING COUNT(*) > 1 ORDER BY p.id", "project "},
+	}
+	for _, owner := range owners {
+		for _, group := range groups {
+			args := make([]any, len(group))
+			for i, name := range group {
+				args[i] = name
+			}
+			names, err := queryStrings(tx, fmt.Sprintf(owner.query, placeholders(len(group))), args...)
+			if err != nil {
+				return nil, err
+			}
+			for _, name := range names {
+				if !slices.Contains(out, owner.prefix+name) {
+					out = append(out, owner.prefix+name)
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func queryStrings(tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // dedupeLabelNames trims, drops blanks, dedupes and sorts raw label names. The

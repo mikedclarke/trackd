@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -359,16 +360,40 @@ func cmdExport(args []string) error {
 	if *out == "" {
 		return s.ExportDump(os.Stdout)
 	}
-	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	return writeNewFile(*out, s.ExportDump)
+}
+
+// writeNewFile writes path through a temp file beside it and publishes it only
+// once write has finished and the bytes are synced, so a failed write never
+// leaves a file under the final name. Link refuses an existing path, which
+// keeps the never-overwrite promise without a check-then-write race; the
+// Lstat only refuses early, before the work.
+func writeNewFile(path string, write func(io.Writer) error) (err error) {
+	if _, err := os.Lstat(path); err == nil {
+		return &os.PathError{Op: "open", Path: path, Err: os.ErrExist}
+	}
+	tmp := path + ".partial"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	if err := s.ExportDump(f); err != nil {
+	defer func() {
+		if rmErr := os.Remove(tmp); err == nil && rmErr != nil {
+			err = rmErr
+		}
+	}()
+	if err := write(f); err != nil {
 		f.Close()
 		return err
 	}
-	// A close error here means the dump may be incomplete on disk.
-	return f.Close()
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Link(tmp, path)
 }
 
 func cmdImport(args []string) error {
@@ -376,6 +401,7 @@ func cmdImport(args []string) error {
 	db := fs.String("db", defaultDB(), "database path (must be new or empty)")
 	actor := fs.String("actor", "linear-import", "actor recorded on imported issues (linear only)")
 	dryRun := fs.Bool("dry-run", false, "parse and validate, report counts, write nothing (linear only)")
+	unverified := fs.Bool("unverified", false, "accept a dump without an end record, whose completeness cannot be checked (trackd only)")
 	if err := parseSet(fs, args); err != nil {
 		return err
 	}
@@ -395,8 +421,15 @@ func cmdImport(args []string) error {
 	defer s.Close()
 	switch format {
 	case "trackd":
-		if err := s.ImportDump(f); err != nil {
+		verified, err := s.ImportDump(f, *unverified)
+		if errors.Is(err, store.ErrUnverifiedDump) {
+			return fmt.Errorf("%s: %w; pass --unverified to import it anyway", path, err)
+		}
+		if err != nil {
 			return err
+		}
+		if !verified {
+			fmt.Fprintf(os.Stderr, "trackd: %s has no end record, so its completeness could not be checked\n", path)
 		}
 		fmt.Println("imported", path, "into", *db)
 		return nil
