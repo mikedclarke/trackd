@@ -178,3 +178,32 @@ func TestIssueAssigneeAndMilestone(t *testing.T) {
 		t.Errorf("archived milestone was assignable: %v", err)
 	}
 }
+
+// Restating an issue's current project, in any case, is not a move: the
+// milestone stays and nothing is written.
+func TestIssueSameProjectKeepsMilestone(t *testing.T) {
+	s := milestoneFixture(t)
+	issue := mustCreateIssue(t, s, IssueInput{Title: "Ship it", Project: "rebuild", Milestone: "Launch"}, "pm")
+	events, err := s.ListEvents("issue", issue.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range []string{"rebuild", "REBUILD"} {
+		got, err := s.UpdateIssue(issue.Key, IssuePatch{Project: &project}, "pm")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Milestone != "Launch" || got.Version != issue.Version {
+			t.Errorf("project %q: milestone %q at version %d, want Launch at version %d", project, got.Milestone, got.Version, issue.Version)
+		}
+		after, err := s.ListEvents("issue", issue.ID, 0)
+		if err != nil || len(after) != len(events) {
+			t.Errorf("project %q recorded an event: %d -> %d (%v)", project, len(events), len(after), err)
+		}
+	}
+	// A typo is still a bad reference, not a quiet no-op.
+	typo := "rebiuld"
+	if _, err := s.UpdateIssue(issue.Key, IssuePatch{Project: &typo}, "pm"); !errors.Is(err, ErrInvalidRef) {
+		t.Errorf("unknown project = %v, want ErrInvalidRef", err)
+	}
+}

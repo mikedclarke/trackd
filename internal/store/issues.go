@@ -189,11 +189,15 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 			if err != nil {
 				return err
 			}
-			sets, args = append(sets, "project_id = ?"), append(args, projectID)
-			// Milestones belong to a project: moving the issue clears its
-			// milestone unless the patch also sets one valid in the new project.
-			if p.Milestone == nil && before.Milestone != "" {
-				sets = append(sets, "milestone_id = NULL")
+			// Restating the current project (slugs resolve without case) is
+			// not a move, so it keeps the milestone.
+			if !strings.EqualFold(*p.Project, before.Project) {
+				sets, args = append(sets, "project_id = ?"), append(args, projectID)
+				// Milestones belong to a project: moving the issue clears its
+				// milestone unless the patch also sets one valid in the new project.
+				if p.Milestone == nil && before.Milestone != "" {
+					sets = append(sets, "milestone_id = NULL")
+				}
 			}
 		}
 		if p.Assignee != nil {
