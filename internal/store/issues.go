@@ -453,11 +453,21 @@ func issueWhere(f IssueFilter) (string, []any, error) {
 			" AND e.action IN ('issue.created', 'issue.imported') AND e.actor = ? COLLATE NOCASE)")
 		args = append(args, f.CreatedBy)
 	}
+	// Timestamps are stored in one canonical form, so a cutoff compares as
+	// an instant only once it is in that form too.
 	if f.UpdatedSince != "" {
-		where, args = append(where, "i.updated_at >= ?"), append(args, f.UpdatedSince)
+		ts, err := ParseTimestamp(f.UpdatedSince)
+		if err != nil {
+			return "", nil, fmt.Errorf("updated_since: %w", err)
+		}
+		where, args = append(where, "i.updated_at >= ?"), append(args, ts)
 	}
 	if f.CompletedSince != "" {
-		where, args = append(where, "i.completed_at >= ?"), append(args, f.CompletedSince)
+		ts, err := ParseTimestamp(f.CompletedSince)
+		if err != nil {
+			return "", nil, fmt.Errorf("completed_since: %w", err)
+		}
+		where, args = append(where, "i.completed_at >= ?"), append(args, ts)
 	}
 	return strings.Join(where, " AND "), args, nil
 }

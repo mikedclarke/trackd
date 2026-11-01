@@ -38,6 +38,9 @@ unknown parameter is a 400. A filter value that names
 nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
 or a project slug cannot read as "no work": `status`, `status_type`, `project`,
 `label`, `exclude_label`, `milestone` and `parent` all resolve before the query.
+`updated_since` and `completed_since` take an RFC3339 timestamp in any offset,
+with or without fractional seconds, or a bare `YYYY-MM-DD` (midnight UTC), and
+compare as instants; anything else is a 400 `validation`, over MCP as over REST.
 Assignees are free-form names, so an unknown one is simply an empty result.
 `GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone`,
 `token`, `setting` or `view` (a comment or a relation is recorded against its
