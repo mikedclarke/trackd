@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,84 @@ func TestNewestBackupAge(t *testing.T) {
 	}
 	if _, ok := NewestBackupAge(dir); !ok {
 		t.Error("a foreign file broke the age lookup")
+	}
+}
+
+// A corrupt file under a snapshot name never stands in for a backup: the age
+// comes from the newest snapshot that passes its check, and the corrupt file
+// is left in place as evidence.
+func TestNewestBackupAgeSkipsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	s := openTestStore(t)
+	good, err := s.Backup(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hourAgo := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(good, hourAgo, hourAgo); err != nil {
+		t.Fatal(err)
+	}
+	junk := make([]byte, 8192)
+	if _, err := rand.Read(junk); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(dir, "trackd-"+time.Now().UTC().Format("20060102-150405")+"-9.db")
+	if err := os.WriteFile(corrupt, junk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	age, ok := NewestBackupAge(dir)
+	if !ok || age < 59*time.Minute {
+		t.Errorf("age = %v, %v; want the good snapshot's hour", age, ok)
+	}
+	if _, err := os.Stat(corrupt); err != nil {
+		t.Errorf("corrupt snapshot was removed: %v", err)
+	}
+
+	alone := t.TempDir()
+	if err := os.WriteFile(filepath.Join(alone, filepath.Base(corrupt)), junk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if age, ok := NewestBackupAge(alone); ok {
+		t.Errorf("a corrupt snapshot alone reported a backup %v old", age)
+	}
+}
+
+// A snapshot is written under a name pruning and the age lookup ignore, and
+// appears under its own name only once verified.
+func TestBackupLeavesNoPartialUnderFinalName(t *testing.T) {
+	dir := t.TempDir()
+	s := openTestStore(t)
+	snap, err := s.Backup(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(snap) {
+		t.Errorf("backup dir after a backup = %v, want only %s", entries, filepath.Base(snap))
+	}
+
+	failed := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.vacuumIntoContext(ctx, filepath.Join(failed, "trackd-20260101-000000.db")); err == nil {
+		t.Fatal("a canceled snapshot reported success")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		entries, err := os.ReadDir(failed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("left behind after a failed snapshot: %v", entries)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

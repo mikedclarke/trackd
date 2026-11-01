@@ -89,8 +89,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dst.Close()
-	if err := dst.ImportDump(bytes.NewReader(first.Bytes())); err != nil {
-		t.Fatal(err)
+	if verified, err := dst.ImportDump(bytes.NewReader(first.Bytes()), false); err != nil || !verified {
+		t.Fatalf("import = verified %v, %v", verified, err)
 	}
 
 	var second bytes.Buffer
@@ -151,22 +151,23 @@ func TestImportRefusesNonEmpty(t *testing.T) {
 	if err := src.ExportDump(&dump); err != nil {
 		t.Fatal(err)
 	}
-	if err := src.ImportDump(bytes.NewReader(dump.Bytes())); err == nil {
+	if _, err := src.ImportDump(bytes.NewReader(dump.Bytes()), false); err == nil {
 		t.Fatal("import into non-empty database accepted")
 	}
 }
 
 func TestImportRejectsGarbage(t *testing.T) {
 	s := openTestStore(t)
-	if err := s.ImportDump(strings.NewReader("not json\n")); err == nil {
+	if _, err := s.ImportDump(strings.NewReader("not json\n"), true); err == nil {
 		t.Fatal("garbage accepted as dump")
 	}
-	if err := s.ImportDump(strings.NewReader(`{"record":"other","version":1}` + "\n")); err == nil {
+	if _, err := s.ImportDump(strings.NewReader(`{"record":"other","version":1}`+"\n"), true); err == nil {
 		t.Fatal("wrong header accepted")
 	}
 }
 
-// S17: v2 carries the schema in its header and the new columns in its records.
+// The header carries the schema, the records the new columns, and the last
+// line is the end record.
 func TestExportDumpHeaderAndNewFields(t *testing.T) {
 	s := openTestStore(t)
 	mustLabel(t, s, "client-x", "agent-ready")
@@ -190,8 +191,15 @@ func TestExportDumpHeaderAndNewFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if header.Version != 2 || header.Schema != len(migs) {
-		t.Errorf("header = %+v, want version 2 schema %d", header, len(migs))
+	if header.Version != 3 || header.Schema != len(migs) {
+		t.Errorf("header = %+v, want version 3 schema %d", header, len(migs))
+	}
+	var end dumpEnd
+	if err := decodeRecord([]byte(lines[len(lines)-1]), &end); err != nil {
+		t.Fatal(err)
+	}
+	if end.Record != "end" || end.Counts["issue"] != 3 || end.Counts["status"] != 8 || len(end.SHA256) != 64 {
+		t.Errorf("end record = %+v", end)
 	}
 	want := []string{`"idempotency_key":"idem-1"`, `"version":`, `"start_date":"2026-01-01"`, `"target_date":"2026-06-30"`, `"completed_at":`, `"parent_id":`}
 	for _, fragment := range want {
@@ -201,16 +209,19 @@ func TestExportDumpHeaderAndNewFields(t *testing.T) {
 	}
 }
 
-// S17: a v1 dump written before the cutover still imports.
+// A v1 dump has no end record: refused by default, imported when the caller
+// accepts that its completeness cannot be checked.
 func TestImportDumpV1Fixture(t *testing.T) {
-	f, err := os.Open(filepath.Join("testdata", "dump_v1.jsonl"))
+	fixture, err := os.ReadFile(filepath.Join("testdata", "dump_v1.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
 	s := openTestStore(t)
-	if err := s.ImportDump(f); err != nil {
-		t.Fatalf("importing a v1 dump: %v", err)
+	if _, err := s.ImportDump(bytes.NewReader(fixture), false); !errors.Is(err, ErrUnverifiedDump) {
+		t.Fatalf("v1 dump without the opt-in = %v, want ErrUnverifiedDump", err)
+	}
+	if verified, err := s.ImportDump(bytes.NewReader(fixture), true); err != nil || verified {
+		t.Fatalf("importing a v1 dump = verified %v, %v", verified, err)
 	}
 	issue, err := s.GetIssue("ACME-1")
 	if err != nil {
@@ -240,12 +251,12 @@ func TestImportDumpV1Fixture(t *testing.T) {
 	if next.Key != "ACME-3" {
 		t.Errorf("next key = %s, want ACME-3", next.Key)
 	}
-	// The imported dump re-exports as v2.
+	// The imported dump re-exports as the current version.
 	var out bytes.Buffer
 	if err := s.ExportDump(&out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.String(), `{"record":"trackd","version":2,"schema":`) {
+	if !strings.HasPrefix(out.String(), `{"record":"trackd","version":3,"schema":`) {
 		t.Errorf("re-export header = %s", strings.SplitN(out.String(), "\n", 2)[0])
 	}
 }
@@ -253,9 +264,9 @@ func TestImportDumpV1Fixture(t *testing.T) {
 // S17: an unknown field means a dump this binary cannot load faithfully.
 func TestImportRejectsUnknownFields(t *testing.T) {
 	s := openTestStore(t)
-	dump := `{"record":"trackd","version":2,"schema":3}` + "\n" +
+	dump := `{"record":"trackd","version":3,"schema":3}` + "\n" +
 		`{"record":"setting","key":"issue_prefix","value":"ACME","extra":true}` + "\n"
-	err := s.ImportDump(strings.NewReader(dump))
+	_, err := s.ImportDump(strings.NewReader(dump), false)
 	if err == nil || !strings.Contains(err.Error(), "extra") {
 		t.Fatalf("unknown field = %v, want a rejection naming it", err)
 	}
@@ -264,8 +275,87 @@ func TestImportRejectsUnknownFields(t *testing.T) {
 // S17: a dump from a newer schema is refused rather than half-loaded.
 func TestImportRejectsNewerSchema(t *testing.T) {
 	s := openTestStore(t)
-	dump := `{"record":"trackd","version":2,"schema":99}` + "\n"
-	if err := s.ImportDump(strings.NewReader(dump)); !errors.Is(err, ErrSchemaNewer) {
+	dump := `{"record":"trackd","version":3,"schema":99}` + "\n"
+	if _, err := s.ImportDump(strings.NewReader(dump), false); !errors.Is(err, ErrSchemaNewer) {
 		t.Fatalf("newer schema = %v, want ErrSchemaNewer", err)
+	}
+}
+
+// A dump cut short on a line boundary, or altered, is refused before the
+// destination's seeded settings and statuses are lost.
+func TestImportRefusesTruncatedDump(t *testing.T) {
+	src := openTestStore(t)
+	if err := src.UpdateSetting("issue_prefix", "ACME", "pm"); err != nil {
+		t.Fatal(err)
+	}
+	issue := mustCreateIssue(t, src, IssueInput{Title: "Kept"}, "pm")
+	if _, _, err := src.AddComment(issue.Key, CommentInput{Body: "note"}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	var dump bytes.Buffer
+	if err := src.ExportDump(&dump); err != nil {
+		t.Fatal(err)
+	}
+	full := dump.String()
+	lines := strings.SplitAfter(full, "\n")
+	cutBeforeEvents := full[:strings.Index(full, `{"record":"event"`)]
+	dropped := strings.Replace(full, `{"record":"setting","key":"workspace_name","value":"trackd"}`+"\n", "", 1)
+	if dropped == full {
+		t.Fatal("fixture: workspace_name record not found")
+	}
+	changed := strings.Replace(full, `"title":"Kept"`, `"title":"Kapt"`, 1)
+	if changed == full {
+		t.Fatal("fixture: issue title not found")
+	}
+	cases := []struct {
+		name, body, want string
+	}{
+		{"cut before events", cutBeforeEvents, "no end record"},
+		{"header only", lines[0], "no end record"},
+		{"line dropped", dropped, "end record counts"},
+		{"byte changed", changed, "checksum does not match"},
+		{"line after end", full + `{"record":"setting","key":"extra","value":"x"}` + "\n", "after the end record"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := openTestStore(t)
+			_, err := dst.ImportDump(strings.NewReader(tc.body), false)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("import = %v, want a refusal saying %q", err, tc.want)
+			}
+			statuses, err := dst.ListStatuses()
+			if err != nil || len(statuses) != 8 {
+				t.Errorf("statuses after the refusal = %d, %v, want the 8 seeded", len(statuses), err)
+			}
+			if prefix, err := dst.Setting("issue_prefix"); err != nil || prefix != "TSK" {
+				t.Errorf("issue_prefix after the refusal = %q, %v, want the seeded TSK", prefix, err)
+			}
+		})
+	}
+}
+
+// A dump whose label groups its own memberships break is refused, so the
+// import cannot bring in a clash the setting would have refused.
+func TestImportRefusesGroupConflict(t *testing.T) {
+	src := openTestStore(t)
+	mustLabel(t, src, "ready", "blocked")
+	issue := mustCreateIssue(t, src, IssueInput{Title: "Both", Labels: []string{"ready", "blocked"}}, "pm")
+	if err := src.SetSetting("label_groups", `[["ready","blocked"]]`); err != nil {
+		t.Fatal(err)
+	}
+	var dump bytes.Buffer
+	if err := src.ExportDump(&dump); err != nil {
+		t.Fatal(err)
+	}
+	dst := openTestStore(t)
+	_, err := dst.ImportDump(bytes.NewReader(dump.Bytes()), false)
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), issue.Key) {
+		t.Fatalf("import = %v, want ErrConflict naming %s", err, issue.Key)
+	}
+	if issues, err := dst.ListIssues(IssueFilter{}); err != nil || len(issues) != 0 {
+		t.Errorf("issues after the refusal = %d, %v", len(issues), err)
+	}
+	if statuses, err := dst.ListStatuses(); err != nil || len(statuses) != 8 {
+		t.Errorf("statuses after the refusal = %d, %v", len(statuses), err)
 	}
 }

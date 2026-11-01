@@ -1613,6 +1613,10 @@ func exitCode(err error) int {
 	if errors.As(err, &transport) {
 		return 6
 	}
+	// A server-side command writing the file directly gets the store's error.
+	if errors.Is(err, store.ErrConflict) {
+		return 5
+	}
 	return 1
 }
 
@@ -1632,6 +1636,8 @@ func errorObject(err error) map[string]any {
 		obj["code"] = "usage"
 	case errors.As(err, &transport):
 		obj["code"] = "unreachable"
+	case errors.Is(err, store.ErrConflict):
+		obj["code"] = "conflict"
 	}
 	return obj
 }

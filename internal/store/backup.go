@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,10 +76,15 @@ func (s *Store) vacuumInto(dest string) (string, error) {
 	return s.vacuumIntoContext(context.Background(), dest)
 }
 
+// vacuumIntoContext writes the snapshot under a temp name that snapshotName
+// cannot match and renames it to dest only once it has passed its integrity
+// check, so a process killed mid-write never leaves a file that pruning or the
+// startup age lookup would take for a snapshot.
 func (s *Store) vacuumIntoContext(ctx context.Context, dest string) (string, error) {
 	if _, err := os.Stat(dest); err == nil {
 		return "", fmt.Errorf("snapshot target %s already exists", dest)
 	}
+	tmp := filepath.Join(filepath.Dir(dest), "."+filepath.Base(dest)+".partial")
 	done := make(chan error, 1)
 	go func() {
 		done <- func() error {
@@ -87,14 +93,25 @@ func (s *Store) vacuumIntoContext(ctx context.Context, dest string) (string, err
 				return err
 			}
 			defer db.Close()
-			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
+			if _, err := db.ExecContext(ctx, "VACUUM INTO ?", tmp); err != nil {
+				_ = os.Remove(tmp)
 				return err
 			}
-			if err := verifyIntegrity(dest); err != nil {
-				_ = os.Remove(dest)
+			if err := verifyIntegrity(tmp); err != nil {
+				_ = os.Remove(tmp)
 				return fmt.Errorf("snapshot failed integrity check: %w", err)
 			}
-			return nil
+			// An abandoned attempt must not publish after the caller has
+			// reported it failed.
+			if err := ctx.Err(); err != nil {
+				_ = os.Remove(tmp)
+				return err
+			}
+			if err := os.Rename(tmp, dest); err != nil {
+				_ = os.Remove(tmp)
+				return err
+			}
+			return syncDir(filepath.Dir(dest))
 		}()
 	}()
 	select {
@@ -105,14 +122,24 @@ func (s *Store) vacuumIntoContext(ctx context.Context, dest string) (string, err
 		return dest, nil
 	case <-ctx.Done():
 		// The goroutine may be wedged in an uninterruptible filesystem call;
-		// whatever it leaves behind is a partial snapshot nobody may mistake
-		// for a good one, so remove it whenever the call finally returns.
+		// whatever it leaves behind is a partial snapshot, so remove it
+		// whenever the call finally returns.
 		go func() {
 			<-done
-			_ = os.Remove(dest)
+			_ = os.Remove(tmp)
 		}()
 		return "", ctx.Err()
 	}
+}
+
+// syncDir makes a new directory entry durable.
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func verifyIntegrity(path string) error {
@@ -183,15 +210,21 @@ func PruneBackups(dir string, keep int) ([]string, error) {
 	return removed, nil
 }
 
-// NewestBackupAge reports how long ago the newest snapshot in dir was written.
-// The bool is false when the directory holds no snapshot at all, which is what
-// the server's startup rule needs to tell "too soon" from "never".
+// NewestBackupAge reports how long ago the newest snapshot in dir that passes
+// its integrity check was written. The bool is false when no snapshot passes,
+// which is what the server's startup rule needs to tell "too soon" from "never".
+// A snapshot that fails its check is logged and left in place, as evidence,
+// the same way PruneBackups treats it.
 func NewestBackupAge(dir string) (time.Duration, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, false
 	}
-	var newest time.Time
+	type snap struct {
+		path string
+		mod  time.Time
+	}
+	var snaps []snap
 	for _, e := range entries {
 		if e.IsDir() || !snapshotName.MatchString(e.Name()) {
 			continue
@@ -200,18 +233,21 @@ func NewestBackupAge(dir string) (time.Duration, bool) {
 		if err != nil {
 			continue
 		}
-		if info.ModTime().After(newest) {
-			newest = info.ModTime()
+		snaps = append(snaps, snap{path: filepath.Join(dir, e.Name()), mod: info.ModTime()})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].mod.After(snaps[j].mod) })
+	for _, sn := range snaps {
+		if err := verifyIntegrity(sn.path); err != nil {
+			log.Printf("trackd: snapshot %s failed its integrity check and does not count as a backup: %v", sn.path, err)
+			continue
 		}
+		age := time.Since(sn.mod)
+		if age < 0 {
+			age = 0
+		}
+		return age, true
 	}
-	if newest.IsZero() {
-		return 0, false
-	}
-	age := time.Since(newest)
-	if age < 0 {
-		age = 0
-	}
-	return age, true
+	return 0, false
 }
 
 // Restore copies a verified snapshot to dbPath. It refuses to overwrite an
@@ -257,10 +293,5 @@ func Restore(snapshot, dbPath string) error {
 		return fmt.Errorf("restored file failed its integrity check: %w", err)
 	}
 	// The copy is durable only once the directory entry pointing at it is.
-	dir, err := os.Open(filepath.Dir(dbPath))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return syncDir(filepath.Dir(dbPath))
 }
