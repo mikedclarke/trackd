@@ -595,6 +595,8 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		Entity:    q.Get("entity"),
 		IssueKeys: q["key"],
 		Limit:     limit,
+		Viewer:    tokenName(r),
+		AllViews:  tokenRole(r) == roleAdmin,
 	})
 	if err != nil {
 		writeStoreError(w, r, err)

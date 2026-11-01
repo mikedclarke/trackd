@@ -130,3 +130,68 @@ func TestListAllEventsByIssueKeys(t *testing.T) {
 		t.Error("more than MaxEventIssueKeys keys were accepted")
 	}
 }
+
+// A private view's events reach only its owner and an admin's read. The
+// clause sits in the query, so a page is never cut short by a hidden row.
+func TestListAllEventsHidesPrivateViews(t *testing.T) {
+	s := openTestStore(t)
+	first := mustCreateIssue(t, s, IssueInput{Title: "First"}, "pm")
+	no := false
+	filter := ViewFilter{Statuses: []string{"Todo"}}
+	if _, err := s.CreateView(ViewInput{Name: "Alex only", Filter: filter, Shared: &no}, "alex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateView(ViewInput{Name: "Everyone", Filter: filter}, "alex"); err != nil {
+		t.Fatal(err)
+	}
+	second := mustCreateIssue(t, s, IssueInput{Title: "Second"}, "pm")
+
+	keys := func(f EventFilter) string {
+		t.Helper()
+		events, err := s.ListAllEvents(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, e := range events {
+			out = append(out, e.EntityKey)
+		}
+		return strings.Join(out, ",")
+	}
+	everyone := first.Key + ",Everyone," + second.Key
+	all := first.Key + ",Alex only,Everyone," + second.Key
+	for _, tc := range []struct {
+		name   string
+		filter EventFilter
+		want   string
+	}{
+		{"another viewer", EventFilter{Viewer: "sam"}, everyone},
+		{"no viewer", EventFilter{}, everyone},
+		{"another viewer, views only", EventFilter{Viewer: "sam", Entity: "view"}, "Everyone"},
+		{"the owner", EventFilter{Viewer: "alex"}, all},
+		{"an admin", EventFilter{Viewer: "sam", AllViews: true}, all},
+	} {
+		if got := keys(tc.filter); got != tc.want {
+			t.Errorf("%s: feed = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+
+	// One event a page: every page another viewer reads is full until the
+	// last, and together they are the unpaged feed.
+	var paged []string
+	var after int64
+	for range 10 {
+		page, err := s.ListAllEvents(EventFilter{Viewer: "sam", AfterID: after, Limit: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		paged = append(paged, page[0].EntityKey)
+		after = page[0].ID
+	}
+	if got := strings.Join(paged, ","); got != everyone {
+		t.Errorf("paged feed = %s, want %s", got, everyone)
+	}
+}

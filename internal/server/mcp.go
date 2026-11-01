@@ -714,6 +714,8 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 			Entity:    in.Entity,
 			IssueKeys: in.Keys,
 			Limit:     in.Limit,
+			Viewer:    tokenActor,
+			AllViews:  role == roleAdmin,
 		})
 		if err != nil {
 			return nil, mcpActivityOut{}, mcpError(err)

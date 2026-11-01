@@ -78,7 +78,11 @@ DELETE, as everywhere else.
 
 Every write records a `view.created`, `view.updated`, `view.archived` or
 `view.restored` event with the view's name as `entity_key`; `GET
-/api/v1/events?entity=view` reads them.
+/api/v1/events?entity=view` reads them. A private view's events reach only its
+owner and admin tokens, in the REST feed and in MCP `list_activity` alike. The
+rule is the view's visibility as it stands now, for its whole history: a view
+made private hides its earlier events, and a private view later shared shows
+them.
 
 ## Responses
 
