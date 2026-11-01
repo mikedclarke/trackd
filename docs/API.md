@@ -38,6 +38,9 @@ unknown parameter is a 400. A filter value that names
 nothing is a 422 `invalid_ref` rather than an empty page, so a typo in a label
 or a project slug cannot read as "no work": `status`, `status_type`, `project`,
 `label`, `exclude_label`, `milestone` and `parent` all resolve before the query.
+`updated_since` and `completed_since` take an RFC3339 timestamp in any offset,
+with or without fractional seconds, or a bare `YYYY-MM-DD` (midnight UTC), and
+compare as instants; anything else is a 400 `validation`, over MCP as over REST.
 Assignees are free-form names, so an unknown one is simply an empty result.
 `GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone`,
 `token`, `setting` or `view` (a comment or a relation is recorded against its
@@ -75,7 +78,11 @@ DELETE, as everywhere else.
 
 Every write records a `view.created`, `view.updated`, `view.archived` or
 `view.restored` event with the view's name as `entity_key`; `GET
-/api/v1/events?entity=view` reads them.
+/api/v1/events?entity=view` reads them. A private view's events reach only its
+owner and admin tokens, in the REST feed and in MCP `list_activity` alike. The
+rule is the view's visibility as it stands now, for its whole history: a view
+made private hides its earlier events, and a private view later shared shows
+them.
 
 ## Responses
 
@@ -178,7 +185,9 @@ a missing key can never turn an update into a new issue, and carries the same
 `append_description`, `add_labels`, `remove_labels`, `replace_description`
 (admin tokens only, as over REST), `expected_version` and `idempotency_key`
 fields as the API. The read tools are
-annotated read-only, and nothing in the tool set is destructive.
+annotated read-only, and nothing in the tool set is destructive. `save_issue`
+and `add_comment` are annotated as not idempotent: an unkeyed create, an
+`append_description` and a comment each add again when called twice.
 
 For Claude Code, add to `.mcp.json`:
 

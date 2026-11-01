@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -161,14 +163,17 @@ func TestMCPToolList(t *testing.T) {
 		}
 	}
 	// The save tools addressed by an identity are idempotent; a bare comment
-	// append is not.
-	for _, name := range []string{"save_issue", "save_project", "save_milestone", "save_relation"} {
+	// append is not, and neither is save_issue, whose unkeyed create and
+	// append_description add each call.
+	for _, name := range []string{"save_project", "save_milestone", "save_relation"} {
 		if !byName[name].Annotations.IdempotentHint {
 			t.Errorf("%s idempotentHint = false, want true", name)
 		}
 	}
-	if byName["add_comment"].Annotations.IdempotentHint {
-		t.Error("add_comment idempotentHint = true, want false")
+	for _, name := range []string{"save_issue", "add_comment"} {
+		if byName[name].Annotations.IdempotentHint {
+			t.Errorf("%s idempotentHint = true, want false", name)
+		}
 	}
 
 	// mode is a required enum on save_issue.
@@ -583,6 +588,43 @@ func TestMCPListActivity(t *testing.T) {
 	}
 	if msg := callErr(t, session, "list_activity", map[string]any{"keys": []string{"TSK-99"}}); !strings.Contains(msg, "[invalid_ref]") {
 		t.Errorf("unknown key = %q, want invalid_ref", msg)
+	}
+}
+
+// The timestamp filters mean the same instant over MCP as over REST, however
+// the offset is written, and a malformed one is a validation error on both.
+func TestMCPTimestampFiltersMatchREST(t *testing.T) {
+	e := newTestEnv(t)
+	session := mcpSessionAs(t, e.store, "sam", "agent")
+	issue, _, err := e.store.CreateIssue(store.IssueInput{Title: "Recent", Status: "Done"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, issue.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cutoff string
+		want   int
+	}{
+		{at.Add(-30 * time.Minute).In(time.FixedZone("", 5*3600)).Format(time.RFC3339), 1},
+		{at.Add(30 * time.Minute).In(time.FixedZone("", -5*3600)).Format(time.RFC3339), 0},
+	} {
+		for _, field := range []string{"updated_since", "completed_since"} {
+			var viaMCP mcpIssuesOut
+			callTool(t, session, "list_issues", map[string]any{field: tc.cutoff}, &viaMCP)
+			viaREST := e.issues("?" + field + "=" + url.QueryEscape(tc.cutoff))
+			if len(viaMCP.Issues) != tc.want || len(viaREST.Issues) != tc.want {
+				t.Errorf("%s %s: MCP %d issues, REST %d, want %d", field, tc.cutoff, len(viaMCP.Issues), len(viaREST.Issues), tc.want)
+			}
+		}
+	}
+	for _, field := range []string{"updated_since", "completed_since"} {
+		if msg := callErr(t, session, "list_issues", map[string]any{field: "yesterday"}); !strings.HasPrefix(msg, "[validation]") {
+			t.Errorf("MCP %s=yesterday = %q, want [validation]", field, msg)
+		}
+		e.expectError("GET", "/api/v1/issues?"+field+"=yesterday", nil, http.StatusBadRequest, codeValidation)
 	}
 }
 

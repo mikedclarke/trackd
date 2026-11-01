@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // statusByName is COLLATE NOCASE, so a status named in any case resolves to
@@ -608,5 +609,51 @@ func TestUpdateIssueNoChangeAndKeyCase(t *testing.T) {
 	}
 	if _, err := s.GetIssue(strings.ToLower(issue.Key)); err != nil {
 		t.Errorf("GetIssue by lowercase key: %v", err)
+	}
+}
+
+// The timestamp filters compare instants, however the caller writes them, and
+// a value that is not a timestamp is an error rather than an empty page.
+func TestIssueTimestampFilters(t *testing.T) {
+	s := openTestStore(t)
+	done := mustCreateIssue(t, s, IssueInput{Title: "Shipped", Status: "Done"}, "pm")
+	mustCreateIssue(t, s, IssueInput{Title: "Open"}, "pm")
+	at, err := time.Parse(time.RFC3339Nano, done.CompletedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier, later := at.Add(-30*time.Minute), at.Add(30*time.Minute)
+	east, west := time.FixedZone("", 5*3600), time.FixedZone("", -5*3600)
+	const millis = "2006-01-02T15:04:05.000Z07:00"
+	for _, tc := range []struct {
+		cutoff        string
+		updated, done int
+	}{
+		{earlier.UTC().Format(time.RFC3339), 2, 1},
+		{earlier.In(east).Format(time.RFC3339), 2, 1},
+		{earlier.In(west).Format(time.RFC3339), 2, 1},
+		{earlier.In(east).Format(millis), 2, 1},
+		{earlier.UTC().Format("2006-01-02"), 2, 1},
+		{later.UTC().Format(millis), 0, 0},
+		{later.In(east).Format(time.RFC3339), 0, 0},
+		{later.In(west).Format(time.RFC3339), 0, 0},
+		{later.In(west).Format(millis), 0, 0},
+	} {
+		updated, err := s.ListIssues(IssueFilter{UpdatedSince: tc.cutoff})
+		if err != nil || len(updated) != tc.updated {
+			t.Errorf("updated_since %s = %d issues (%v), want %d", tc.cutoff, len(updated), err, tc.updated)
+		}
+		completed, err := s.ListIssues(IssueFilter{CompletedSince: tc.cutoff})
+		if err != nil || len(completed) != tc.done {
+			t.Errorf("completed_since %s = %d issues (%v), want %d", tc.cutoff, len(completed), err, tc.done)
+		}
+	}
+	for _, bad := range []string{"yesterday", "2026-13-01"} {
+		if _, err := s.ListIssues(IssueFilter{UpdatedSince: bad}); err == nil || !strings.Contains(err.Error(), "updated_since") {
+			t.Errorf("updated_since %q = %v, want an error naming the field", bad, err)
+		}
+		if _, err := s.ListIssues(IssueFilter{CompletedSince: bad}); err == nil || !strings.Contains(err.Error(), "completed_since") {
+			t.Errorf("completed_since %q = %v, want an error naming the field", bad, err)
+		}
 	}
 }

@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -92,9 +95,19 @@ type viewRow struct {
 	Actions []viewRowAction
 }
 
-// viewRowAction is a quick action as the row's form posts it.
+// viewRowAction is a quick action as the row's form posts it: its name and
+// the signature of what it did when the page was rendered.
 type viewRowAction struct {
 	Name string
+	Sig  string
+}
+
+// quickActionSig fingerprints what a quick action does, so a button rendered
+// for one definition is refused once the view's owner has changed it.
+func quickActionSig(q store.QuickAction) string {
+	b, _ := json.Marshal(q) // a QuickAction always marshals
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
 }
 
 // quickActionByName finds a view's quick action by its (unique) name.
@@ -147,7 +160,7 @@ func (s *Server) uiView(w http.ResponseWriter, r *http.Request) {
 	}
 	var actions []viewRowAction
 	for _, q := range view.QuickActions {
-		actions = append(actions, viewRowAction{Name: q.Name})
+		actions = append(actions, viewRowAction{Name: q.Name, Sig: quickActionSig(q)})
 	}
 	rows := make([]viewRow, len(issues))
 	for i, issue := range issues {
@@ -234,9 +247,11 @@ func describeViewFilter(f store.ViewFilter) []string {
 
 // uiIssueAction is the one write path behind every row form and the issue
 // page's own action box: an optional reply, then a patch made of the fields
-// the form set plus a quick action if one was pressed. The patch carries the
-// version the page was rendered with, so a change that lost a race answers
-// with a conflict notice rather than overwriting; the reply is posted first
+// the form set plus a quick action if one was pressed. The form and the quick
+// action are checked before anything is written, so a refused form leaves
+// the issue untouched, reply included. The patch carries the version the page
+// was rendered with, so a change that lost a race answers with a conflict
+// notice rather than overwriting; the reply is posted before the patch
 // because a reply is never wrong, and it survives a conflict.
 func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r) {
@@ -252,6 +267,25 @@ func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 	fail := func(msg string) {
 		http.Redirect(w, r, withNotice(back, uiNotice{Kind: "error", Key: key, Text: msg}), http.StatusSeeOther)
 	}
+	patch, err := actionPatch(r.PostForm)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	if do := r.PostFormValue("do"); strings.HasPrefix(do, "quick:") {
+		// The button posts the action's signature and name, not its
+		// position, so a view edited between the page render and the tap
+		// applies the action the person read or nothing at all. The
+		// signature is hex, so the first colon after it ends it.
+		sig, name, _ := strings.Cut(strings.TrimPrefix(do, "quick:"), ":")
+		view, err := s.visibleView(r.PostFormValue("view"), actor, role)
+		q, ok := quickActionByName(view, name)
+		if err != nil || !ok || quickActionSig(q) != sig {
+			fail("that quick action changed since the page loaded; reload the view")
+			return
+		}
+		patch = mergePatch(patch, q.Patch())
+	}
 	body := strings.ReplaceAll(r.PostFormValue("body"), "\r\n", "\n")
 	if strings.TrimSpace(body) != "" {
 		if _, _, err := s.store.AddComment(key, store.CommentInput{Body: body}, actor); err != nil {
@@ -262,23 +296,6 @@ func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 			fail(err.Error())
 			return
 		}
-	}
-	patch, err := actionPatch(r.PostForm)
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	if do := r.PostFormValue("do"); strings.HasPrefix(do, "quick:") {
-		// The button posts the action's name, not its position, so a view
-		// edited between the page render and the tap applies the action the
-		// person read or nothing at all.
-		view, err := s.visibleView(r.PostFormValue("view"), actor, role)
-		q, ok := quickActionByName(view, strings.TrimPrefix(do, "quick:"))
-		if err != nil || !ok {
-			fail("that quick action no longer exists; reload the view")
-			return
-		}
-		patch = mergePatch(patch, q.Patch())
 	}
 	if patchEmpty(patch) {
 		if strings.TrimSpace(body) == "" {

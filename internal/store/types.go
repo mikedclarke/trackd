@@ -158,6 +158,11 @@ type EventFilter struct {
 	// several issues' histories in one request instead of one each.
 	IssueKeys []string
 	Limit     int
+	// Viewer and AllViews decide which view events the feed carries, by the
+	// same rule as ListViews: shared views and the viewer's own, or every
+	// view for an admin's read.
+	Viewer   string
+	AllViews bool
 }
 
 type Milestone struct {

@@ -114,6 +114,14 @@ func (s *Store) ListAllEvents(f EventFilter) ([]Event, error) {
 		}
 		where, args = append(where, "e.entity = ?"), append(args, f.Entity)
 	}
+	if !f.AllViews {
+		// A view's events carry the whole view, so a private one's are
+		// filtered here, in the query, where a hidden row cannot shorten a
+		// page and end a caller's paging early. Visibility is the view's as
+		// it stands now, the rule a direct read applies.
+		where = append(where, "(e.entity <> 'view' OR EXISTS (SELECT 1 FROM views v WHERE v.id = e.entity_id AND (v.shared = 1 OR v.owner = ?)))")
+		args = append(args, f.Viewer)
+	}
 	if len(f.IssueKeys) > 0 {
 		if f.Entity != "" && !strings.EqualFold(f.Entity, "issue") {
 			return nil, fmt.Errorf("issue keys narrow the issue events; entity %q cannot be combined with them", f.Entity)

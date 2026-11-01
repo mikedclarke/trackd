@@ -1,10 +1,12 @@
 package server
 
 import (
+	"html"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -129,7 +131,7 @@ func TestUIRowActions(t *testing.T) {
 	// the label goes, and the redirect carries a notice back to the view.
 	code, location := post(t, client, action, url.Values{
 		"back": {back + "#" + issue.Key}, "view": {view.Name}, "expected_version": {version()},
-		"body": {"Signed off.\r\nGo."}, "do": {"quick:Answered"},
+		"body": {"Signed off.\r\nGo."}, "do": {"quick:" + quickActionSig(view.QuickActions[0]) + ":Answered"},
 	})
 	if code != http.StatusSeeOther || !strings.HasPrefix(location, back) || !strings.Contains(location, "notice=saved") {
 		t.Fatalf("quick action = %d -> %q", code, location)
@@ -203,7 +205,8 @@ func TestUIRowActions(t *testing.T) {
 		t.Errorf("empty post = %d -> %q", code, location)
 	}
 	// A quick action name that no longer exists is refused, not applied.
-	code, location = post(t, client, action, url.Values{"back": {back}, "view": {view.Name}, "expected_version": {version()}, "do": {"quick:Archive"}})
+	gone := "quick:" + quickActionSig(store.QuickAction{Name: "Archive"}) + ":Archive"
+	code, location = post(t, client, action, url.Values{"back": {back}, "view": {view.Name}, "expected_version": {version()}, "do": {gone}})
 	if !strings.Contains(location, "notice=error") {
 		t.Errorf("bad quick name = %d -> %q", code, location)
 	}
@@ -233,6 +236,79 @@ func TestUIRowActions(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther || !strings.Contains(resp.Header.Get("Location"), "/ui/login") {
 		t.Errorf("unauthenticated action = %d -> %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+// A quick-action button carries a signature of the action it showed. Once the
+// view's owner changes what that action does, the old button is refused and
+// the issue is left exactly as it was, reply included; a change to another
+// action leaves the button working.
+func TestUIQuickActionStale(t *testing.T) {
+	ts, client, token, st := newUIEnv(t)
+	view := seedView(t, st)
+	issue, _, err := st.CreateIssue(store.IssueInput{Title: "Parked", Status: "Todo", Labels: []string{"waiting"}}, "seo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, ts.URL, client, token)
+	page := "/ui/view/Waiting%20on%20me"
+	answered := regexp.MustCompile(`value="(quick:[^"]*)" class="quick">Answered</button>`)
+	button := func() string {
+		t.Helper()
+		code, body := fetch(t, client, ts.URL+page)
+		m := answered.FindStringSubmatch(body)
+		if code != http.StatusOK || m == nil {
+			t.Fatalf("view page = %d, no Answered button", code)
+		}
+		return html.UnescapeString(m[1])
+	}
+	press := func(do, body string) string {
+		t.Helper()
+		_, location := post(t, client, ts.URL+"/ui/issue/"+issue.Key+"/action", url.Values{
+			"back": {page}, "view": {view.Name}, "expected_version": {strconv.FormatInt(issue.Version, 10)}, "body": {body}, "do": {do},
+		})
+		return location
+	}
+	stale := button()
+
+	// The owner makes Answered close the issue, keeping its name.
+	changed := []store.QuickAction{{Name: "Answered", Status: "Done"}, {Name: "Ship", Status: "Done"}}
+	if _, err := st.UpdateView(view.Name, store.ViewPatch{QuickActions: &changed}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	for _, do := range []string{stale, "quick:Answered"} {
+		if location := press(do, "reply"); !strings.Contains(location, "notice=error") {
+			t.Errorf("%s after the action changed -> %q, want an error notice", do, location)
+		}
+	}
+	after, err := st.GetIssue(issue.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "Todo" || strings.Join(after.Labels, ",") != "waiting" || after.Version != issue.Version {
+		t.Errorf("refused action changed the issue: status %q labels %v version %d", after.Status, after.Labels, after.Version)
+	}
+	if comments, err := st.ListComments(issue.Key); err != nil || len(comments) != 0 {
+		t.Errorf("refused action posted its reply: %+v, %v", comments, err)
+	}
+
+	// The fresh button still works after another action and the description
+	// change, because its own action did not.
+	fresh := button()
+	if fresh == stale {
+		t.Fatalf("button value %q did not change with its action", fresh)
+	}
+	one := 1
+	changed[1].Priority = &one
+	description := "changed"
+	if _, err := st.UpdateView(view.Name, store.ViewPatch{QuickActions: &changed, Description: &description}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	if location := press(fresh, ""); !strings.Contains(location, "notice=saved") {
+		t.Fatalf("fresh button -> %q, want saved", location)
+	}
+	if after, _ = st.GetIssue(issue.Key); after.Status != "Done" {
+		t.Errorf("fresh button left status %q, want Done", after.Status)
 	}
 }
 

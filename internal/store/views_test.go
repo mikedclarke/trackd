@@ -129,9 +129,13 @@ func TestViewLifecycle(t *testing.T) {
 	if strings.Join(actions, ",") != "view.archived,view.updated,view.created" {
 		t.Errorf("events = %v", actions)
 	}
-	feed, err := s.ListAllEvents(EventFilter{Entity: "view"})
-	if err != nil || len(feed) != 4 || feed[0].EntityKey != "Court" {
-		t.Errorf("view feed = %+v, %v", feed, err)
+	// The first view is private now, so the whole view feed is an admin's
+	// read or its owner's.
+	for _, f := range []EventFilter{{Entity: "view", AllViews: true}, {Entity: "view", Viewer: "pm"}} {
+		feed, err := s.ListAllEvents(f)
+		if err != nil || len(feed) != 4 || feed[0].EntityKey != "Court" {
+			t.Errorf("view feed %+v = %+v, %v", f, feed, err)
+		}
 	}
 }
 

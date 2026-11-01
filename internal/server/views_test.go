@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/mikedclarke/trackd/internal/store"
@@ -112,4 +114,92 @@ func TestViewsAPI(t *testing.T) {
 	if len(feed.Events) != 4 || feed.Events[3].Action != "view.archived" || feed.Events[3].EntityKey != "Waiting on me" {
 		t.Errorf("view events = %+v", feed.Events)
 	}
+}
+
+// A private view stays out of the shared activity feed for everyone who could
+// not read it directly, over REST and MCP alike, and hiding it never ends a
+// page early.
+func TestPrivateViewHiddenFromFeed(t *testing.T) {
+	e := newTestEnv(t) // pm owns the view
+	other, err := e.store.CreateToken("alex", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := e.adminToken()
+	otherMCP := mcpSessionAs(t, e.store, "sam", "agent")
+	adminMCP := mcpSessionAs(t, e.store, "root", "admin")
+	const marker = "pm-only-notes"
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "first"}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/views", map[string]any{
+		"name": "Mine", "description": marker, "shared": false,
+		"filter": map[string]any{"statuses": []string{"Todo"}},
+	}, http.StatusCreated, nil)
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "second"}, http.StatusCreated, nil)
+
+	restSees := func(query string) bool {
+		t.Helper()
+		var feed eventListResponse
+		e.expect("GET", "/api/v1/events"+query, nil, http.StatusOK, &feed)
+		for _, ev := range feed.Events {
+			if strings.Contains(string(ev.After), marker) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, query := range []string{"", "?entity=view"} {
+		if !restSees(query) {
+			t.Errorf("owner: REST feed%s lacks the private view", query)
+		}
+		e.withToken(other, func() {
+			if restSees(query) {
+				t.Errorf("another token: REST feed%s carries the private view", query)
+			}
+		})
+		e.withToken(admin, func() {
+			if !restSees(query) {
+				t.Errorf("admin: REST feed%s lacks the private view", query)
+			}
+		})
+	}
+	for _, args := range []map[string]any{nil, {"entity": "view"}} {
+		var act mcpActivityOut
+		callTool(t, otherMCP, "list_activity", args, &act)
+		if strings.Contains(fmt.Sprint(act.Events), marker) {
+			t.Errorf("another token: list_activity %v carries the private view", args)
+		}
+		callTool(t, adminMCP, "list_activity", args, &act)
+		if !strings.Contains(fmt.Sprint(act.Events), marker) {
+			t.Errorf("admin: list_activity %v lacks the private view", args)
+		}
+	}
+
+	// One event a page: the other token's pages stay full, each with a
+	// cursor, until the last, and together they are its unpaged feed.
+	e.withToken(other, func() {
+		var whole eventListResponse
+		e.expect("GET", "/api/v1/events", nil, http.StatusOK, &whole)
+		var paged []int64
+		path := "/api/v1/events?limit=1"
+		for range 20 {
+			var page eventListResponse
+			e.expect("GET", path, nil, http.StatusOK, &page)
+			if len(page.Events) == 0 {
+				break
+			}
+			if page.NextAfterID == nil {
+				t.Fatalf("a full page after %v carried no cursor", paged)
+			}
+			paged = append(paged, page.Events[0].ID)
+			path = fmt.Sprintf("/api/v1/events?limit=1&after_id=%d", *page.NextAfterID)
+		}
+		if len(paged) != len(whole.Events) {
+			t.Fatalf("paged %d events, unpaged %d", len(paged), len(whole.Events))
+		}
+		for i, ev := range whole.Events {
+			if ev.Entity == "view" || paged[i] != ev.ID {
+				t.Errorf("event %d: paged id %d, unpaged %+v", i, paged[i], ev)
+			}
+		}
+	})
 }

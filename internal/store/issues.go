@@ -189,11 +189,15 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 			if err != nil {
 				return err
 			}
-			sets, args = append(sets, "project_id = ?"), append(args, projectID)
-			// Milestones belong to a project: moving the issue clears its
-			// milestone unless the patch also sets one valid in the new project.
-			if p.Milestone == nil && before.Milestone != "" {
-				sets = append(sets, "milestone_id = NULL")
+			// Restating the current project (slugs resolve without case) is
+			// not a move, so it keeps the milestone.
+			if !strings.EqualFold(*p.Project, before.Project) {
+				sets, args = append(sets, "project_id = ?"), append(args, projectID)
+				// Milestones belong to a project: moving the issue clears its
+				// milestone unless the patch also sets one valid in the new project.
+				if p.Milestone == nil && before.Milestone != "" {
+					sets = append(sets, "milestone_id = NULL")
+				}
 			}
 		}
 		if p.Assignee != nil {
@@ -449,11 +453,21 @@ func issueWhere(f IssueFilter) (string, []any, error) {
 			" AND e.action IN ('issue.created', 'issue.imported') AND e.actor = ? COLLATE NOCASE)")
 		args = append(args, f.CreatedBy)
 	}
+	// Timestamps are stored in one canonical form, so a cutoff compares as
+	// an instant only once it is in that form too.
 	if f.UpdatedSince != "" {
-		where, args = append(where, "i.updated_at >= ?"), append(args, f.UpdatedSince)
+		ts, err := ParseTimestamp(f.UpdatedSince)
+		if err != nil {
+			return "", nil, fmt.Errorf("updated_since: %w", err)
+		}
+		where, args = append(where, "i.updated_at >= ?"), append(args, ts)
 	}
 	if f.CompletedSince != "" {
-		where, args = append(where, "i.completed_at >= ?"), append(args, f.CompletedSince)
+		ts, err := ParseTimestamp(f.CompletedSince)
+		if err != nil {
+			return "", nil, fmt.Errorf("completed_since: %w", err)
+		}
+		where, args = append(where, "i.completed_at >= ?"), append(args, ts)
 	}
 	return strings.Join(where, " AND "), args, nil
 }
