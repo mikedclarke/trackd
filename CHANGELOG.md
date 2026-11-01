@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The dump format is version 3: `trackd export` ends the dump with an end
+  record holding the count of each record type and the sha256 of every byte
+  before it, and `trackd import trackd` checks a dump against it before
+  anything is kept. A dump cut short on a line boundary, with a line missing or
+  changed, or with anything after the end record is refused and the database is
+  left as it was; before, a dump cut short (even to its header line alone)
+  imported as complete. A dump written before this release has no end record
+  and is refused unless `--unverified` is passed, which imports it with a
+  stderr line saying its completeness could not be checked. An older trackd
+  refuses a version 3 dump.
+- `trackd export --out` writes to `<file>.partial` and gives the dump its name
+  only once it is complete and synced, so a failed export leaves no file behind
+  instead of a partial one under the final name.
+- MCP `save_issue` is annotated as not idempotent (`idempotentHint: false`):
+  an unkeyed create and an `append_description` add again when called twice,
+  so a client must not retry it as if it were safe to repeat.
+
+### Fixed
+
+- `trackd setting set label_groups` over issues or projects that already hold
+  more than one label of a group (archived ones included) is refused with exit
+  5, listing them; before, the setting was stored and the clash kept. An import
+  whose label memberships break its own `label_groups` is refused the same way.
+  Ordinary label writes on an issue that already clashes are unchanged.
+- A backup is written under a temporary name and takes its snapshot name only
+  once it passes its integrity check, so a backup killed mid-write no longer
+  leaves a file that looks like a snapshot. At startup, a recent snapshot skips
+  the startup backup and dates the last backup in `/healthz` only when it
+  passes its integrity check; a corrupt one is logged and left in place, and
+  the newest good snapshot, or a fresh backup, is used instead.
+- Setting an issue's project to the one it already has (in any case) no longer
+  clears its milestone, bumps its version or records an event.
+- `updated_since` and `completed_since` compare as instants on every interface:
+  a cutoff written with an offset or fractional seconds now matches what REST
+  already returned, and a value that is not a timestamp is a `validation`
+  error over MCP (and from the store) instead of an empty list.
+- A private saved view's events no longer appear in the shared activity feed
+  (`GET /api/v1/events` and MCP `list_activity`) for anyone but its owner and
+  admin tokens. Visibility follows the view as it stands now, for its whole
+  history: a view made private hides its earlier events, and a private view
+  later shared shows them to everyone. Paging is unaffected.
+- A quick-action button on a view page whose action was changed after the page
+  loaded is refused with "reload the view" instead of applying the new
+  definition, and a refused action leaves the issue untouched, including any
+  reply typed with it.
+
 ## [0.6.0] - 2026-10-12
 
 ### Added
