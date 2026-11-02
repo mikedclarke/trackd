@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-02
+
 ### Changed
 
 - The dump format is version 3: `trackd export` ends the dump with an end
