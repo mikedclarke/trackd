@@ -237,6 +237,11 @@ func wrapIntegrity(path string, err error) error {
 // The lock file is not the database and is safe to leave behind.
 func LockExclusive(path string) (func(), error) { return lockFile(path + ".lock") }
 
+// LockFile takes the same non-blocking advisory lock on path itself, creating
+// the file when it is missing; ErrLocked means another process holds it. A
+// crash releases it. On Windows it is a no-op, as LockExclusive is.
+func LockFile(path string) (func(), error) { return lockFile(path) }
+
 func (s *Store) checkSchemaVersion(migrations int) error {
 	var current int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&current); err != nil {

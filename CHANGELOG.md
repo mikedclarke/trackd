@@ -7,6 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `trackd export --out` after an export that was killed no longer fails with
+  "file exists" on the `<file>.partial` it left behind: the next export to the
+  same path takes that file over. An advisory lock on the temp file tells a
+  leftover from an export still writing to it, and a second export to the same
+  path while one runs is refused, as before.
+- Pruning (`trackd backup --keep`, `serve --backup-keep`) removes the hidden
+  `.trackd-<stamp>.db.partial` a snapshot killed mid-write leaves in the backup
+  directory, once it has gone an hour unwritten. Before, nothing removed it, and
+  each one was the size of the database.
+
 ## [0.7.0] - 2026-11-02
 
 ### Changed

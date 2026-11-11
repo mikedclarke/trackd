@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -66,6 +67,61 @@ func TestWriteNewFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".partial"); !os.IsNotExist(err) {
 		t.Errorf("temp file left after a refused publish: %v", err)
+	}
+}
+
+// A run killed after creating its temp file leaves it behind; the next export
+// to the same path takes it over instead of failing with "file exists", and
+// the stale bytes do not survive into the published file.
+func TestWriteNewFileAfterKilledRun(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dump.jsonl")
+	if err := os.WriteFile(path+".partial", []byte("half of a much longer dump from the killed run\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNewFile(path, func(w io.Writer) error {
+		_, err := io.WriteString(w, "complete\n")
+		return err
+	}); err != nil {
+		t.Fatalf("rerun after a killed export: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "complete\n" {
+		t.Fatalf("published file = %q, %v", got, err)
+	}
+	if _, err := os.Stat(path + ".partial"); !os.IsNotExist(err) {
+		t.Errorf("temp file still present: %v", err)
+	}
+}
+
+// An export still writing to the temp file holds its lock, so a second export
+// to the same path is refused and leaves the first one's file alone.
+func TestWriteNewFileRefusesWhileAnotherRuns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no advisory lock on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dump.jsonl")
+	unlock, err := store.LockFile(path + ".partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if err := os.WriteFile(path+".partial", []byte("in progress\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = writeNewFile(path, func(w io.Writer) error {
+		_, err := io.WriteString(w, "second\n")
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("writeNewFile = %v, want a refusal", err)
+	}
+	if got, err := os.ReadFile(path + ".partial"); err != nil || string(got) != "in progress\n" {
+		t.Errorf("running export's temp file = %q, %v", got, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a file was published under the final name: %v", err)
 	}
 }
 

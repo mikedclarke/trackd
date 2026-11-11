@@ -368,13 +368,27 @@ func cmdExport(args []string) error {
 // leaves a file under the final name. Link refuses an existing path, which
 // keeps the never-overwrite promise without a check-then-write race; the
 // Lstat only refuses early, before the work.
+//
+// The temp file has a fixed name, so a run killed before its cleanup leaves it
+// behind; the next run to the same path takes it over and starts it afresh. An
+// advisory lock on it, held until it is removed, is what tells a leftover from
+// another export still writing there, which is refused.
 func writeNewFile(path string, write func(io.Writer) error) (err error) {
 	if _, err := os.Lstat(path); err == nil {
 		return &os.PathError{Op: "open", Path: path, Err: os.ErrExist}
 	}
 	tmp := path + ".partial"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	unlock, err := store.LockFile(tmp)
+	if errors.Is(err, store.ErrLocked) {
+		return fmt.Errorf("another export to %s is still running", path)
+	}
 	if err != nil {
+		return err
+	}
+	defer unlock()
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	defer func() {

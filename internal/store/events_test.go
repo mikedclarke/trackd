@@ -195,3 +195,57 @@ func TestListAllEventsHidesPrivateViews(t *testing.T) {
 		t.Errorf("paged feed = %s, want %s", got, everyone)
 	}
 }
+
+// Feed visibility is the view's as it stands now. trackd never deletes a view
+// row (archiving keeps it), so an archived shared view's events stay in
+// everyone's feed; a row gone from the table some other way (a hand edit, a
+// partial restore) takes its events out of every feed but an admin's, the
+// safe direction for a view that may have been private. An admin still gets
+// the events, with an empty key, since the name is read from the row.
+func TestListAllEventsDeletedView(t *testing.T) {
+	s := openTestStore(t)
+	filter := ViewFilter{Statuses: []string{"Todo"}}
+	kept, err := s.CreateView(ViewInput{Name: "Kept", Filter: filter}, "alex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, err := s.CreateView(ViewInput{Name: "Gone", Filter: filter}, "alex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	if _, err := s.UpdateView(kept.Name, ViewPatch{Archived: &yes}, "alex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("DELETE FROM views WHERE id = ?", gone.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	keys := func(f EventFilter) string {
+		t.Helper()
+		f.Entity = "view"
+		events, err := s.ListAllEvents(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, e := range events {
+			out = append(out, e.EntityKey)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, tc := range []struct {
+		name   string
+		filter EventFilter
+		want   string
+	}{
+		{"another viewer", EventFilter{Viewer: "sam"}, "Kept,Kept"},
+		{"the owner", EventFilter{Viewer: "alex"}, "Kept,Kept"},
+		{"no viewer", EventFilter{}, "Kept,Kept"},
+		{"an admin", EventFilter{Viewer: "sam", AllViews: true}, "Kept,,Kept"},
+	} {
+		if got := keys(tc.filter); got != tc.want {
+			t.Errorf("%s: view feed = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}

@@ -164,7 +164,9 @@ record type and the sha256 of every byte before it
 (`{"record":"end","counts":{...},"sha256":"..."}`). `--out` writes to
 `<file>.partial` beside the target and gives it its name only once the dump is
 complete and synced; an existing file is never overwritten, and a failed export
-leaves no file behind.
+leaves no file behind. A `.partial` left by an export that was killed is taken
+over by the next export to the same path; one that another export is still
+writing is refused.
 
 `import trackd` loads a dump into a new or empty database and checks it against
 its end record before anything is kept: a dump cut short, with a line missing

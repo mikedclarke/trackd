@@ -276,3 +276,45 @@ func TestRestoreRefusesWithSidecars(t *testing.T) {
 		t.Fatalf("restored issue = %+v, %v", issue, err)
 	}
 }
+
+// A snapshot killed mid-write leaves its hidden temp file behind. Pruning
+// removes it once it has gone unwritten for stalePartialAge, leaves a fresh one
+// (a snapshot still being written) alone, and never touches a hidden file of
+// any other shape.
+func TestPruneBackupsRemovesStalePartials(t *testing.T) {
+	dir := t.TempDir()
+	s := openTestStore(t)
+	snap, err := s.Backup(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * stalePartialAge)
+	write := func(name string, mod time.Time) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("half a database"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	stale := write(".trackd-20260101-000000.db.partial", old)
+	staleSuffixed := write(".trackd-20260101-000000-2.db.partial", old)
+	fresh := write(".trackd-20260102-000000.db.partial", time.Now())
+	foreign := write(".notes.db.partial", old)
+
+	removed, err := PruneBackups(dir, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(removed, ","), staleSuffixed+","+stale; got != want {
+		t.Errorf("removed %s, want %s", got, want)
+	}
+	for _, path := range []string{snap, fresh, foreign} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was pruned: %v", filepath.Base(path), err)
+		}
+	}
+}

@@ -17,6 +17,16 @@ import (
 // a file that happens to sit in the backup directory.
 var snapshotName = regexp.MustCompile(`^trackd-\d{8}-\d{6}(-\d+)?\.db$`)
 
+// partialName matches the hidden temp file a snapshot is written under until
+// it has passed its integrity check, and nothing else.
+var partialName = regexp.MustCompile(`^\.trackd-\d{8}-\d{6}(-\d+)?\.db\.partial$`)
+
+// stalePartialAge is how long a temp file must have gone unwritten before
+// pruning takes it for a killed run's leftover. A snapshot still being written
+// touches its file far more often, and the scheduler gives up on one after ten
+// minutes by default.
+const stalePartialAge = time.Hour
+
 // Backup writes a verified snapshot of the live database into dir and returns
 // its path. Snapshots are full databases produced by VACUUM INTO and checked
 // with PRAGMA integrity_check before being reported as successful.
@@ -170,8 +180,9 @@ func verifyIntegrity(path string) error {
 // PruneBackups removes the oldest trackd-*.db snapshots in dir beyond keep,
 // ordered by modification time. Files that fail their integrity check are
 // neither counted nor removed: a corrupt snapshot is evidence, and deleting
-// it could take the last good copy's place in the count. Returns the removed
-// paths.
+// it could take the last good copy's place in the count. A hidden temp file a
+// killed snapshot left behind, unwritten for stalePartialAge, is removed too:
+// it never passed its check, so it is no snapshot. Returns the removed paths.
 func PruneBackups(dir string, keep int) ([]string, error) {
 	if keep < 1 {
 		return nil, fmt.Errorf("keep must be >= 1, got %d", keep)
@@ -185,8 +196,13 @@ func PruneBackups(dir string, keep int) ([]string, error) {
 		mod  time.Time
 	}
 	var snaps []snap
+	var stale []string
 	for _, e := range entries {
-		if e.IsDir() || !snapshotName.MatchString(e.Name()) {
+		if e.IsDir() {
+			continue
+		}
+		isSnap := snapshotName.MatchString(e.Name())
+		if !isSnap && !partialName.MatchString(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -194,6 +210,12 @@ func PruneBackups(dir string, keep int) ([]string, error) {
 			return nil, err
 		}
 		path := filepath.Join(dir, e.Name())
+		if !isSnap {
+			if time.Since(info.ModTime()) > stalePartialAge {
+				stale = append(stale, path)
+			}
+			continue
+		}
 		if err := verifyIntegrity(path); err != nil {
 			continue
 		}
@@ -201,6 +223,12 @@ func PruneBackups(dir string, keep int) ([]string, error) {
 	}
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].mod.After(snaps[j].mod) })
 	var removed []string
+	for _, path := range stale {
+		if err := os.Remove(path); err != nil {
+			return removed, err
+		}
+		removed = append(removed, path)
+	}
 	for _, old := range snaps[min(keep, len(snaps)):] {
 		if err := os.Remove(old.path); err != nil {
 			return removed, err
