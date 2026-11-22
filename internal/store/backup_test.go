@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -316,5 +319,134 @@ func TestPruneBackupsRemovesStalePartials(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s was pruned: %v", filepath.Base(path), err)
 		}
+	}
+}
+
+// A restore is copied under a temp name and published only once verified, so
+// a run killed mid-copy leaves nothing at the database path. The temp name is
+// fixed, so a leftover one is refused rather than overwritten, and the
+// restored file is readable by its owner only.
+func TestRestoreThroughTempFile(t *testing.T) {
+	dir := t.TempDir()
+	s := openTestStore(t)
+	if _, _, err := s.CreateIssue(IssueInput{Title: "precious"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.Backup(filepath.Join(dir, "backups"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blocked := filepath.Join(dir, "blocked.db")
+	if err := os.WriteFile(blocked+".restoring", []byte("another restore"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Restore(snap, blocked); err == nil {
+		t.Fatal("restore ran over a leftover temp file")
+	}
+	if got, err := os.ReadFile(blocked + ".restoring"); err != nil || string(got) != "another restore" {
+		t.Errorf("leftover temp file = %q, %v; want it untouched", got, err)
+	}
+	if _, err := os.Stat(blocked); !os.IsNotExist(err) {
+		t.Errorf("a refused restore wrote the database: %v", err)
+	}
+
+	good := filepath.Join(dir, "restored.db")
+	if err := Restore(snap, good); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(good + ".restoring"); !os.IsNotExist(err) {
+		t.Errorf("temp file left after a restore: %v", err)
+	}
+	info, err := os.Stat(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("restored file mode = %v, want 0600", info.Mode().Perm())
+	}
+
+	err = Restore(snap, good)
+	if err == nil || !strings.Contains(err.Error(), "stop the server") {
+		t.Errorf("restore over an existing database = %v, want advice to stop the server", err)
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Errorf("restore over an existing database = %v, want it to wrap os.ErrExist", err)
+	}
+}
+
+// A snapshot dated more than a few minutes ahead was written under a wrong
+// clock. It must not read as a fresh backup forever, which would skip every
+// startup backup, and pruning must take it first rather than the real
+// snapshots written since.
+func TestFutureDatedSnapshots(t *testing.T) {
+	s := openTestStore(t)
+	dir := t.TempDir()
+	snap := func(mod time.Time) string {
+		t.Helper()
+		p, err := s.Backup(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	yearAhead := time.Now().Add(365 * 24 * time.Hour)
+	future := []string{snap(yearAhead), snap(yearAhead.Add(time.Hour))}
+	if age, ok := NewestBackupAge(dir); ok {
+		t.Errorf("only future-dated snapshots: NewestBackupAge = %v, true; want false", age)
+	}
+
+	// A clock a minute or two fast is not suspect.
+	slightlyAhead := snap(time.Now().Add(2 * time.Minute))
+	if age, ok := NewestBackupAge(dir); !ok || age != 0 {
+		t.Errorf("a snapshot two minutes ahead: NewestBackupAge = %v, %v; want 0, true", age, ok)
+	}
+	hourAgo := snap(time.Now().Add(-time.Hour))
+	if err := os.Remove(slightlyAhead); err != nil {
+		t.Fatal(err)
+	}
+	if age, ok := NewestBackupAge(dir); !ok || age < 59*time.Minute {
+		t.Errorf("NewestBackupAge = %v, %v; want the hour-old snapshot", age, ok)
+	}
+
+	fresh := snap(time.Now())
+	removed, err := PruneBackups(dir, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(removed)
+	sort.Strings(future)
+	if got, want := strings.Join(removed, ","), strings.Join(future, ","); got != want {
+		t.Errorf("pruned %v, want the two future-dated snapshots", removed)
+	}
+	for _, p := range []string{fresh, hourAgo} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was pruned: %v", filepath.Base(p), err)
+		}
+	}
+}
+
+// Two snapshots in the same second can pick the same temp name. The second
+// one fails up front and leaves the first one's file alone, instead of
+// deleting it mid-write when its own VACUUM INTO fails.
+func TestBackupLeavesAnotherRunsTempFile(t *testing.T) {
+	s := openTestStore(t)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "trackd-20260101-101010.db")
+	tmp := filepath.Join(dir, ".trackd-20260101-101010.db.partial")
+	if err := os.WriteFile(tmp, []byte("another run is writing this"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.vacuumIntoContext(context.Background(), dest); err == nil {
+		t.Fatal("a snapshot over another run's temp file reported success")
+	}
+	if got, err := os.ReadFile(tmp); err != nil || string(got) != "another run is writing this" {
+		t.Errorf("the other run's temp file = %q, %v; want it untouched", got, err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("a snapshot was published: %v", err)
 	}
 }

@@ -505,7 +505,7 @@ func parseLinearTime(s string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return t.UTC().Format(time.RFC3339), nil
+	return t.UTC().Format(timestampFormat), nil
 }
 
 // parseLinearDueDate recovers the calendar date from Linear's export, which

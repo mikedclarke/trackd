@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -205,5 +206,74 @@ func TestIssueSameProjectKeepsMilestone(t *testing.T) {
 	typo := "rebiuld"
 	if _, err := s.UpdateIssue(issue.Key, IssuePatch{Project: &typo}, "pm"); !errors.Is(err, ErrInvalidRef) {
 		t.Errorf("unknown project = %v, want ErrInvalidRef", err)
+	}
+}
+
+// Milestone names are matched without case when an issue names one, so two
+// open milestones in a project may not differ only in case: create, rename
+// and unarchive all refuse the clash. An archived milestone frees its name,
+// and the same name in another project is fine.
+func TestMilestoneNameUniqueWithoutCase(t *testing.T) {
+	s := milestoneFixture(t)
+	if _, err := s.CreateProject(ProjectInput{Name: "Other"}, "pm"); err != nil {
+		t.Fatal(err)
+	}
+	beta, err := s.CreateMilestone(MilestoneInput{Project: "rebuild", Name: "Beta"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := s.ListMilestones("rebuild", false)
+	if err != nil || len(launch) != 2 {
+		t.Fatalf("milestones = %+v, %v", launch, err)
+	}
+	launchID := launch[0].ID
+	if launch[0].Name != "Launch" {
+		launchID = launch[1].ID
+	}
+	yes, no := true, false
+	renameTo := func(name string) *string { return &name }
+	cases := []struct {
+		name  string
+		write func() error
+		ok    bool
+	}{
+		{"create, other case", func() error {
+			_, err := s.CreateMilestone(MilestoneInput{Project: "rebuild", Name: "beta"}, "pm")
+			return err
+		}, false},
+		{"create, other project", func() error {
+			_, err := s.CreateMilestone(MilestoneInput{Project: "other", Name: "BETA"}, "pm")
+			return err
+		}, true},
+		{"rename into another's name", func() error {
+			_, err := s.UpdateMilestone(launchID, MilestonePatch{Name: renameTo("BETA")}, "pm")
+			return err
+		}, false},
+		{"rename to its own name in another case", func() error {
+			_, err := s.UpdateMilestone(beta.ID, MilestonePatch{Name: renameTo("beta")}, "pm")
+			return err
+		}, true},
+		{"archive frees the name", func() error {
+			if _, err := s.UpdateMilestone(beta.ID, MilestonePatch{Archived: &yes}, "pm"); err != nil {
+				return err
+			}
+			_, err := s.CreateMilestone(MilestoneInput{Project: "rebuild", Name: "Beta"}, "pm")
+			return err
+		}, true},
+		{"unarchive into a clash", func() error {
+			_, err := s.UpdateMilestone(beta.ID, MilestonePatch{Archived: &no}, "pm")
+			return err
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.write()
+			if tc.ok && err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if !tc.ok && (!errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "already exists in project rebuild")) {
+				t.Fatalf("= %v, want ErrConflict naming the project", err)
+			}
+		})
 	}
 }

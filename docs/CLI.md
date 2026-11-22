@@ -150,6 +150,17 @@ Server maintenance commands (`serve`, `token`, `setting`, `backup`, `restore`,
 `export`, `import`) operate on the database file directly. They take `--db`, or
 `$TRACKD_DB`, and fall back to `./trackd.db`.
 
+They use the same exit codes as the client commands:
+
+| Exit | When |
+|---|---|
+| 2 | A usage mistake, an invalid setting value, or a dump with no end record imported without `--unverified` |
+| 3 | `token add`, `token revoke` or `setting set` against a path with no database (`no database at <path>`); they never create one |
+| 5 | Another trackd holds the database (`another trackd is running on <path>`), the export or restore target already exists, another export to the same path is still running, or a `label_groups` clash |
+| 1 | Anything else, such as a file that cannot be read or a database that fails its integrity check |
+
+`serve` and `import` create the database when it is missing.
+
 ### Export and import
 
 ```sh
@@ -166,7 +177,14 @@ record type and the sha256 of every byte before it
 complete and synced; an existing file is never overwritten, and a failed export
 leaves no file behind. A `.partial` left by an export that was killed is taken
 over by the next export to the same path; one that another export is still
-writing is refused.
+writing is refused, and so is anything at that name that is not a plain file,
+such as a link. On Windows, and on a filesystem without advisory locks, a
+leftover `.partial` cannot be told from a running export, so it is refused too:
+remove it by hand. The export file is readable by its owner only.
+
+`import --dry-run` (Linear only) parses and validates and writes nothing:
+against a path with no database it runs against a throwaway one in the temp
+folder, which it removes.
 
 `import trackd` loads a dump into a new or empty database and checks it against
 its end record before anything is kept: a dump cut short, with a line missing

@@ -64,8 +64,17 @@ func TestImportLinearCSV(t *testing.T) {
 	if issue.Status != "In Progress" || issue.Priority != 2 || issue.Project != "site-rebuild" {
 		t.Errorf("ACME-1 = %+v", issue)
 	}
-	if issue.CreatedAt != "2026-05-13T11:21:41Z" || issue.StartedAt != "2026-05-14T09:00:00Z" {
+	// Stored in the store's own millisecond format, so imported rows sort and
+	// filter against native ones as instants, not as differently shaped strings.
+	if issue.CreatedAt != "2026-05-13T11:21:41.000Z" || issue.StartedAt != "2026-05-14T09:00:00.000Z" {
 		t.Errorf("ACME-1 timestamps = created %s started %s", issue.CreatedAt, issue.StartedAt)
+	}
+	done, err := s.GetIssue("ACME-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.CompletedAt != "2026-07-01T12:10:54.000Z" || done.UpdatedAt != "2026-07-01T12:10:54.000Z" {
+		t.Errorf("ACME-2 timestamps = completed %s updated %s", done.CompletedAt, done.UpdatedAt)
 	}
 	// Midnight-local due dates round to the intended calendar date.
 	if issue.DueDate != "2026-06-26" {

@@ -84,15 +84,11 @@ func usagef(format string, args ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, args...)}
 }
 
-// issueKeyRe matches an issue key like TSK-742. It is prefix-agnostic so it
-// works whatever issue_prefix a server is configured with.
-var issueKeyRe = regexp.MustCompile(`^[A-Z]+-\d+$`)
-
-// issueKeyShape is looser than issueKeyRe: any case, and digits after the
-// first letter, so it matches every key an issue_prefix can make plus
-// imported ones. A multi-key update checks each bare word against it, so an
-// unquoted flag value ("--title Fix the bug") is refused instead of being
-// read as more keys.
+// issueKeyShape matches an issue key like TSK-742 in any case, with digits
+// allowed after the first letter, so it matches every key an issue_prefix can
+// make plus imported ones. A multi-key update checks each bare word against
+// it, so an unquoted flag value ("--title Fix the bug") is refused instead of
+// being read as more keys.
 var issueKeyShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*-[0-9]+$`)
 
 // oneOf returns the non-empty value of two flags that mean the same thing (a
@@ -854,7 +850,7 @@ func cmdComment(args []string) error {
 	// alias for `issue comment` so the natural guess just works. `trackd
 	// comment TSK-1 --body ...` and `trackd issue comment TSK-1 --body ...` are
 	// the same command.
-	if issueKeyRe.MatchString(sub) {
+	if issueKeyShape.MatchString(sub) {
 		return issueComment(args)
 	}
 	switch sub {
@@ -1613,9 +1609,15 @@ func exitCode(err error) int {
 	if errors.As(err, &transport) {
 		return 6
 	}
+	if errors.Is(err, errNoDatabase) {
+		return 3
+	}
 	// A server-side command writing the file directly gets the store's error.
-	if errors.Is(err, store.ErrConflict) {
+	switch {
+	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrLocked), errors.Is(err, os.ErrExist):
 		return 5
+	case errors.Is(err, store.ErrUnverifiedDump):
+		return 2
 	}
 	return 1
 }

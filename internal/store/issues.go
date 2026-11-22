@@ -25,6 +25,9 @@ func (s *Store) CreateIssue(in IssueInput, actor string) (*Issue, bool, error) {
 	if err := validDate(in.DueDate); err != nil {
 		return nil, false, fmt.Errorf("due date: %w", err)
 	}
+	if err := validText("issue description", in.Description); err != nil {
+		return nil, false, err
+	}
 	statusName := in.Status
 	if statusName == "" {
 		statusName = "Triage"
@@ -127,6 +130,11 @@ func (s *Store) UpdateIssue(key string, p IssuePatch, actor string) (*Issue, err
 	if p.DueDate != nil {
 		if err := validDate(*p.DueDate); err != nil {
 			return nil, fmt.Errorf("due date: %w", err)
+		}
+	}
+	if p.Description != nil {
+		if err := validText("issue description", *p.Description); err != nil {
+			return nil, err
 		}
 	}
 	var before, out *Issue
@@ -291,6 +299,9 @@ func (s *Store) AppendDescription(key, text, actor string) (*Issue, error) {
 		description := text
 		if before.Description != "" {
 			description = before.Description + "\n\n" + text
+		}
+		if err := validText("issue description after the append", description); err != nil {
+			return fmt.Errorf("issue %s: %w", before.Key, err)
 		}
 		if _, err := tx.Exec(
 			"UPDATE issues SET description = ?, updated_at = ?, version = version + 1 WHERE id = ?",
@@ -554,10 +565,16 @@ func escapeLike(s string) string {
 }
 
 // AddComment appends a comment. created is false when the idempotency key has
-// already been used, in which case the original comment comes back.
+// already been used on the same issue, in which case the original comment comes
+// back whatever the body: a key names the comment, not the request text. A key
+// already used on another issue is a conflict, since returning that comment
+// would report a write to this issue that never happened.
 func (s *Store) AddComment(issueKey string, in CommentInput, actor string) (*Comment, bool, error) {
 	if strings.TrimSpace(in.Body) == "" {
 		return nil, false, errors.New("comment body is required")
+	}
+	if err := validText("comment body", in.Body); err != nil {
+		return nil, false, err
 	}
 	var out *Comment
 	created := true
@@ -567,8 +584,13 @@ func (s *Store) AddComment(issueKey string, in CommentInput, actor string) (*Com
 			err := tx.QueryRow("SELECT id FROM comments WHERE idempotency_key = ?", in.IdempotencyKey).Scan(&id)
 			if err == nil {
 				created = false
-				out, err = loadComment(tx, id)
-				return err
+				if out, err = loadComment(tx, id); err != nil {
+					return err
+				}
+				if !strings.EqualFold(out.IssueKey, issueKey) {
+					return fmt.Errorf("idempotency key %q was already used on another issue: %w", in.IdempotencyKey, ErrConflict)
+				}
+				return nil
 			}
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
@@ -633,6 +655,9 @@ func (s *Store) GetComment(id int64) (*Comment, error) {
 func (s *Store) UpdateComment(id int64, body, actor string) (*Comment, error) {
 	if strings.TrimSpace(body) == "" {
 		return nil, errors.New("comment body is required")
+	}
+	if err := validText("comment body", body); err != nil {
+		return nil, err
 	}
 	var out *Comment
 	err := s.tx(func(tx *sql.Tx) error {

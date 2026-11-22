@@ -32,6 +32,9 @@ var (
 	ErrLocked      = errors.New("database is locked by another trackd")
 	ErrSchemaNewer = errors.New("database schema is newer than this binary")
 	ErrIntegrity   = errors.New("database failed its integrity check")
+	// ErrLockUnsupported is LockFile's answer where no advisory lock can be
+	// taken: on Windows, and on a filesystem without flock.
+	ErrLockUnsupported = errors.New("advisory locks are not supported here")
 
 	// Both of these satisfy errors.Is(err, ErrConflict) as well, so a caller
 	// mapping every conflict to one status code can still tell them apart by
@@ -133,13 +136,19 @@ func OpenWith(path string, opt Options) (*Store, error) {
 // apply to every connection the driver makes, including the ones the backup
 // path opens. Read-only handles leave journal_mode and _txlock off: setting a
 // journal mode writes to the file, and BEGIN IMMEDIATE fails outright on a
-// read-only database.
+// read-only database. On macOS a plain fsync can leave a commit in the drive's
+// cache, so a writer also asks for a full flush on commit and on checkpoint;
+// other systems ignore the two fullfsync pragmas.
 func dataSourceName(path string, readOnly bool) string {
 	params := []string{}
 	if readOnly {
 		params = append(params, "mode=ro")
 	} else {
-		params = append(params, "_pragma=journal_mode(WAL)")
+		params = append(params,
+			"_pragma=journal_mode(WAL)",
+			"_pragma=fullfsync(ON)",
+			"_pragma=checkpoint_fullfsync(ON)",
+		)
 	}
 	params = append(params,
 		"_pragma=synchronous(FULL)",
@@ -231,16 +240,6 @@ func wrapIntegrity(path string, err error) error {
 	}
 	return err
 }
-
-// LockExclusive takes the advisory lock on <path>.lock so a second server, or a
-// CLI command that would migrate the file, cannot run against a live database.
-// The lock file is not the database and is safe to leave behind.
-func LockExclusive(path string) (func(), error) { return lockFile(path + ".lock") }
-
-// LockFile takes the same non-blocking advisory lock on path itself, creating
-// the file when it is missing; ErrLocked means another process holds it. A
-// crash releases it. On Windows it is a no-op, as LockExclusive is.
-func LockFile(path string) (func(), error) { return lockFile(path) }
 
 func (s *Store) checkSchemaVersion(migrations int) error {
 	var current int
@@ -457,6 +456,18 @@ func validTitle(field, s string) (string, error) {
 		return "", fmt.Errorf("%s is %d characters, over the %d character limit: %w", field, n, maxTitleLength, ErrInvalidRef)
 	}
 	return trimmed, nil
+}
+
+// MaxTextLength caps a comment body and an issue description, in bytes. The
+// imports are exempt: they load whatever the source holds.
+const MaxTextLength = 256 << 10
+
+// validText refuses a body or description over MaxTextLength.
+func validText(field, s string) error {
+	if len(s) > MaxTextLength {
+		return fmt.Errorf("%s is %d bytes, over the %d byte limit", field, len(s), MaxTextLength)
+	}
+	return nil
 }
 
 // nullable maps "" to NULL for optional text columns.

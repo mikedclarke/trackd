@@ -39,9 +39,10 @@ has to make the mistakes harmless.
   Code, any other MCP or HTTP client, a local model and your phone all talk to,
   for code and non-code work alike. A person approves, replies and reprioritises
   from the web board; agents do everything else through the API.
-- **Boring on purpose.** Pure Go, no CGO, two direct dependencies (the SQLite
-  driver and the official MCP SDK). No runtime, no containers, no external
-  database, no build step. Cross-compiled for macOS, Linux and Windows.
+- **Boring on purpose.** Pure Go, no CGO, three direct dependencies (the SQLite
+  driver, the official MCP SDK and the SDK's own JSON Schema package). No
+  runtime, no containers, no external database, no build step. Cross-compiled
+  for macOS, Linux and Windows.
 
 trackd imports a Linear CSV export in one command, keys and all, if that is
 where you are coming from.
@@ -169,9 +170,12 @@ button.
   before it opens the file, so not even its integrity check or a migration runs
   against a database another trackd holds. A second server, or a `token add`,
   `token revoke`, `setting set`, `import` or `restore` aimed at a database a
-  server is already serving, refuses with `another trackd is running on <path>`.
-  `export`, `backup`, `token list` and
-  `setting list|get` open the file read-only, so they are always safe to run
+  server is already serving, refuses with `another trackd is running on <path>`
+  (exit 5). The lock lives on `<path>.lock`, so a `restore` is refused even
+  when the database file has been moved aside under a running server.
+  `token add`, `token revoke` and `setting set` refuse a path with no database
+  (exit 3) rather than creating an empty one. `export`, `backup`, `token list`
+  and `setting list|get` open the file read-only, so they are always safe to run
   against a live database.
 - **A damaged or too-new file is refused.** `serve` runs `PRAGMA quick_check`
   before opening a database read-write and refuses a file that fails it, and an
@@ -190,8 +194,9 @@ button.
 - `trackd backup` / `trackd restore <snapshot>` for manual operation. Restore
   refuses to overwrite an existing database, and refuses a destination that still
   has `-wal` or `-shm` sidecars beside it, because those hold writes the snapshot
-  does not; move them aside deliberately. The restored file is verified before the
-  command reports success.
+  does not; stop the server first, then move them aside deliberately. The copy
+  is written to `<db>.restoring` and given its name only once it is synced and
+  verified, so a restore cut short leaves nothing at the database path.
 - `trackd export > dump.jsonl` writes the complete database as human-readable
   JSONL; `trackd import trackd dump.jsonl` loads it into a fresh file. The
   round-trip is byte-identical and enforced by tests. This is the no-lock-in
@@ -309,13 +314,12 @@ commit. `make install` moves a freshly built binary into place rather than
 copying over the old one, which would corrupt a trackd already running from that
 path.
 
-Pure Go, no CGO (`modernc.org/sqlite`), two direct dependencies (the SQLite
-driver and the official MCP SDK). Needs Go 1.26 or newer to build.
+Pure Go, no CGO (`modernc.org/sqlite`), three direct dependencies (the SQLite
+driver, the official MCP SDK and the SDK's own JSON Schema package). Needs Go
+1.26 or newer to build.
 
-Releases are built locally with [goreleaser](https://goreleaser.com)
-(`goreleaser release --clean` on a tag) or with the plain cross-compile loop in
-`Makefile` (`make dist`), then attached to a GitHub release by hand. There is
-no CI.
+Releases are built locally with the plain cross-compile loop in `Makefile`
+(`make dist`), then attached to a GitHub release by hand. There is no CI.
 
 ## Contributing
 

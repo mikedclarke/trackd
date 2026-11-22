@@ -25,6 +25,9 @@ func (s *Store) CreateMilestone(in MilestoneInput, actor string) (*Milestone, er
 		if err != nil {
 			return err
 		}
+		if err := milestoneNameFree(tx, projectID, in.Project, name, 0); err != nil {
+			return err
+		}
 		ts := now()
 		res, err := tx.Exec(`
 			INSERT INTO milestones (project_id, name, description, target_date, created_at, updated_at)
@@ -74,12 +77,27 @@ func (s *Store) UpdateMilestone(id int64, p MilestonePatch, actor string) (*Mile
 		}
 		sets := []string{"updated_at = ?"}
 		args := []any{now()}
+		name := before.Name
 		if p.Name != nil {
-			name, err := validTitle("milestone name", *p.Name)
-			if err != nil {
+			if name, err = validTitle("milestone name", *p.Name); err != nil {
 				return err
 			}
 			sets, args = append(sets, "name = ?"), append(args, name)
+		}
+		// Only an open milestone holds its name, so the check runs when the
+		// result is open and its name or its open state is new.
+		open := before.ArchivedAt == ""
+		if p.Archived != nil {
+			open = !*p.Archived
+		}
+		if open && (p.Name != nil || before.ArchivedAt != "") {
+			var projectID int64
+			if err := tx.QueryRow("SELECT project_id FROM milestones WHERE id = ?", id).Scan(&projectID); err != nil {
+				return err
+			}
+			if err := milestoneNameFree(tx, projectID, before.Project, name, id); err != nil {
+				return err
+			}
 		}
 		if p.Description != nil {
 			sets, args = append(sets, "description = ?"), append(args, *p.Description)
@@ -116,6 +134,24 @@ func (s *Store) UpdateMilestone(id int64, p MilestonePatch, actor string) (*Mile
 		return recordEvent(tx, "milestone", id, actor, "milestone.updated", before, out)
 	})
 	return out, err
+}
+
+// milestoneNameFree rejects a name another open milestone in the project
+// already holds, compared without case, because an issue names its milestone
+// without case and two such names would leave it picking one silently.
+func milestoneNameFree(tx *sql.Tx, projectID any, project, name string, exceptID int64) error {
+	var id int64
+	err := tx.QueryRow(
+		"SELECT id FROM milestones WHERE project_id = ? AND name = ? COLLATE NOCASE AND archived_at IS NULL AND id != ?",
+		projectID, name, exceptID,
+	).Scan(&id)
+	if err == nil {
+		return fmt.Errorf("milestone %q already exists in project %s: %w", name, project, ErrConflict)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 func (s *Store) ListMilestones(project string, includeArchived bool) ([]Milestone, error) {
