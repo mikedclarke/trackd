@@ -477,6 +477,10 @@ func renderPlist(label string, argv []string, logPath string) string {
 	b.WriteString("  </array>\n")
 	b.WriteString("  <key>KeepAlive</key><true/>\n")
 	b.WriteString("  <key>RunAtLoad</key><true/>\n")
+	// 63 is octal 077: everything the service creates is readable by its
+	// owner only, since the database, snapshots, dumps and log all hold the
+	// full issue history.
+	b.WriteString("  <key>Umask</key><integer>63</integer>\n")
 	fmt.Fprintf(&b, "  <key>StandardOutPath</key><string>%s</string>\n", xmlText(logPath))
 	fmt.Fprintf(&b, "  <key>StandardErrorPath</key><string>%s</string>\n", xmlText(logPath))
 	b.WriteString("</dict>\n</plist>\n")

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/mikedclarke/trackd/internal/client"
@@ -39,6 +40,12 @@ func TestExitCode(t *testing.T) {
 		{"unreachable", &client.TransportError{Op: "GET /", Err: errors.New("connection refused")}, 6},
 		{"teapot", &client.APIError{Status: 418, Code: "internal"}, 1},
 		{"anything else", errors.New("boom"), 1},
+		// The server-side commands, which write the file directly.
+		{"database locked", openError("trackd.db", fmt.Errorf("trackd.db.lock: %w", store.ErrLocked)), 5},
+		{"export target exists", &os.PathError{Op: "open", Path: "dump.jsonl", Err: os.ErrExist}, 5},
+		{"export published over", &os.LinkError{Op: "link", Old: "dump.jsonl.partial", New: "dump.jsonl", Err: syscall.EEXIST}, 5},
+		{"restore target exists", fmt.Errorf("refusing to overwrite existing database trackd.db (%w)", os.ErrExist), 5},
+		{"unverified dump", fmt.Errorf("dump.jsonl: %w; pass --unverified to import it anyway", store.ErrUnverifiedDump), 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -370,19 +377,22 @@ func TestOneOf(t *testing.T) {
 // through to that command's own usage, which names the nested command. A
 // non-key, non-verb subcommand still gets the plain unknown-subcommand error.
 func TestCommentKeyRoutesToAdd(t *testing.T) {
-	// No body: routes to issue comment, whose usage error points there.
+	// No body: routes to issue comment, whose usage error points there. Any
+	// key an issue_prefix can make counts, in any case.
 	t.Setenv("TRACKD_TOKEN", "td_test")
 	t.Setenv("TRACKD_URL", "http://127.0.0.1:1")
-	err := cmdComment([]string{"TSK-1"})
 	var usage *usageError
-	if !errors.As(err, &usage) {
-		t.Fatalf("comment TSK-1 = %v, want a usage error", err)
-	}
-	if !strings.Contains(err.Error(), "trackd issue comment") {
-		t.Errorf("usage = %q, want it to name `trackd issue comment`", err.Error())
-	}
-	if exitCode(err) != 2 {
-		t.Errorf("exit code = %d, want 2", exitCode(err))
+	for _, key := range []string{"TSK-1", "AB2-5", "tsk-5"} {
+		err := cmdComment([]string{key})
+		if !errors.As(err, &usage) {
+			t.Fatalf("comment %s = %v, want a usage error", key, err)
+		}
+		if !strings.Contains(err.Error(), "trackd issue comment") || strings.Contains(err.Error(), "unknown comment subcommand") {
+			t.Errorf("comment %s: usage = %q, want issue comment's own usage", key, err.Error())
+		}
+		if exitCode(err) != 2 {
+			t.Errorf("comment %s: exit code = %d, want 2", key, exitCode(err))
+		}
 	}
 
 	// With a body: the alias posts the comment, hitting the add endpoint.
@@ -405,7 +415,7 @@ func TestCommentKeyRoutesToAdd(t *testing.T) {
 		t.Errorf("alias hit %s %s, want POST /api/v1/issues/TSK-1/comments", gotMethod, gotPath)
 	}
 
-	err = cmdComment([]string{"nope"})
+	err := cmdComment([]string{"nope"})
 	if !errors.As(err, &usage) || !strings.Contains(err.Error(), "unknown comment subcommand") {
 		t.Errorf("comment nope = %v, want the plain unknown-subcommand error", err)
 	}

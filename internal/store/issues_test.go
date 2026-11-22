@@ -657,3 +657,131 @@ func TestIssueTimestampFilters(t *testing.T) {
 		}
 	}
 }
+
+// A comment body and an issue description are capped, on every write path,
+// so one oversized write cannot bloat the database and every page that loads
+// it. The refusal is a plain validation error that names both sizes.
+func TestTextLengthLimit(t *testing.T) {
+	limit := MaxTextLength
+	over := strings.Repeat("x", limit+1)
+	s := openTestStore(t)
+	issue := mustCreateIssue(t, s, IssueInput{Title: "Target"}, "pm")
+	c, _, err := s.AddComment(issue.Key, CommentInput{Body: "short"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		write func() error
+	}{
+		{"create description", func() error {
+			_, _, err := s.CreateIssue(IssueInput{Title: "Big", Description: over}, "pm")
+			return err
+		}},
+		{"replace description", func() error {
+			_, err := s.UpdateIssue(issue.Key, IssuePatch{Description: &over, ReplaceDescription: true}, "pm")
+			return err
+		}},
+		{"append past the limit", func() error {
+			_, err := s.AppendDescription(issue.Key, strings.Repeat("y", limit), "pm")
+			return err
+		}},
+		{"add comment", func() error {
+			_, _, err := s.AddComment(issue.Key, CommentInput{Body: over}, "pm")
+			return err
+		}},
+		{"edit comment", func() error {
+			_, err := s.UpdateComment(c.ID, over, "pm")
+			return err
+		}},
+	}
+	if _, err := s.AppendDescription(issue.Key, "already here", "pm"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.write()
+			if err == nil {
+				t.Fatal("an oversized write was stored")
+			}
+			if errors.Is(err, ErrInvalidRef) || errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+				t.Errorf("error %v carries a sentinel; want a plain validation error", err)
+			}
+			if !strings.Contains(err.Error(), "262144") || !strings.Contains(err.Error(), " bytes") {
+				t.Errorf("error %q does not name the limit", err)
+			}
+		})
+	}
+	if got, err := s.GetIssue(issue.Key); err != nil || got.Description != "already here" {
+		t.Errorf("description after the refusals = %d bytes, %v", len(got.Description), err)
+	}
+	if got, err := s.GetComment(c.ID); err != nil || got.Body != "short" {
+		t.Errorf("comment after the refusals = %d bytes, %v", len(got.Body), err)
+	}
+	if n, err := s.CountIssues(IssueFilter{}); err != nil || n != 1 {
+		t.Errorf("issues = %d, %v; the oversized create was stored", n, err)
+	}
+
+	// Exactly at the limit is fine.
+	at := strings.Repeat("z", limit)
+	if _, _, err := s.AddComment(issue.Key, CommentInput{Body: at}, "pm"); err != nil {
+		t.Errorf("a comment at the limit was refused: %v", err)
+	}
+	if _, _, err := s.CreateIssue(IssueInput{Title: "At the limit", Description: at}, "pm"); err != nil {
+		t.Errorf("a description at the limit was refused: %v", err)
+	}
+}
+
+// A comment key names the comment, not the request text: a replay on the same
+// issue returns the stored comment whatever the body, but a replay on another
+// issue would lose that issue's comment, so it is a conflict.
+func TestAddCommentIdempotencyKey(t *testing.T) {
+	s := openTestStore(t)
+	a := mustCreateIssue(t, s, IssueInput{Title: "A"}, "pm")
+	b := mustCreateIssue(t, s, IssueInput{Title: "B"}, "pm")
+	first, created, err := s.AddComment(a.Key, CommentInput{Body: "status: fine", IdempotencyKey: "daily"}, "pm")
+	if err != nil || !created {
+		t.Fatalf("first comment = %+v, created %v, %v", first, created, err)
+	}
+	cases := []struct {
+		name     string
+		issue    string
+		body     string
+		conflict bool
+	}{
+		{"same issue, same body", a.Key, "status: fine", false},
+		{"same issue, other body", a.Key, "status: changed", false},
+		{"same issue, key in lower case", strings.ToLower(a.Key), "status: fine", false},
+		{"other issue", b.Key, "status: blocked", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, created, err := s.AddComment(tc.issue, CommentInput{Body: tc.body, IdempotencyKey: "daily"}, "pm")
+			if tc.conflict {
+				if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), `idempotency key "daily" was already used on another issue`) {
+					t.Fatalf("replay on another issue = %v, want the conflict", err)
+				}
+				return
+			}
+			if err != nil || created {
+				t.Fatalf("replay = created %v, %v; want the stored comment", created, err)
+			}
+			if got.ID != first.ID || got.Body != first.Body {
+				t.Errorf("replay returned %+v, want the stored %+v", got, first)
+			}
+		})
+	}
+	for _, key := range []string{a.Key, b.Key} {
+		comments, err := s.ListComments(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if key == a.Key {
+			want = 1
+		}
+		if len(comments) != want {
+			t.Errorf("%s has %d comments, want %d", key, len(comments), want)
+		}
+	}
+}

@@ -267,6 +267,8 @@ func TestServiceInstall(t *testing.T) {
 		"<string>" + filepath.Join(dir, "backups") + "</string>",
 		"<key>StandardOutPath</key><string>" + filepath.Join(dir, "a&amp;b", "trackd.log") + "</string>",
 		"<key>KeepAlive</key><true/>",
+		// Owner-only: the database, its snapshots, dumps and the log.
+		"<key>Umask</key><integer>63</integer>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plist lacks %q:\n%s", want, got)

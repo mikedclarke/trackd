@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -136,7 +137,7 @@ func openError(path string, err error) error {
 	case errors.Is(err, store.ErrSchemaNewer):
 		return fmt.Errorf("%s was written by a newer trackd; upgrade this binary before opening the file", path)
 	case errors.Is(err, store.ErrLocked):
-		return fmt.Errorf("another trackd is running on %s", path)
+		return fmt.Errorf("another trackd is running on %s: %w", path, store.ErrLocked)
 	}
 	return err
 }
@@ -150,6 +151,19 @@ func openLocked(path string) (*store.Store, error) {
 		return nil, openError(path, err)
 	}
 	return st, nil
+}
+
+// errNoDatabase is what a command that changes an existing database reports
+// when there is none at the path: creating one would hand back a token or a
+// setting the real server never sees.
+var errNoDatabase = errors.New("no database")
+
+// openExisting is openLocked for a database that must already exist.
+func openExisting(path string) (*store.Store, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w at %s", errNoDatabase, path)
+	}
+	return openLocked(path)
 }
 
 func cmdServe(args []string) error {
@@ -238,7 +252,7 @@ func cmdToken(args []string) error {
 		if fs.NArg() != 1 {
 			return usagef("usage: trackd token add [--db <path>] [--role agent|admin] <name>")
 		}
-		st, err := openLocked(*db)
+		st, err := openExisting(*db)
 		if err != nil {
 			return err
 		}
@@ -270,7 +284,7 @@ func cmdToken(args []string) error {
 		if fs.NArg() != 1 {
 			return usagef("usage: trackd token revoke [--db <path>] <name>")
 		}
-		st, err := openLocked(*db)
+		st, err := openExisting(*db)
 		if err != nil {
 			return err
 		}
@@ -326,18 +340,14 @@ func cmdRestore(args []string) error {
 	if fs.NArg() != 1 {
 		return usagef("usage: trackd restore [--db <path>] <snapshot.db>")
 	}
-	// A live server holds the lock on its own database file. Restore never
-	// overwrites an existing file, but check the lock first so the reason
-	// given is the real one.
-	if _, err := os.Stat(*db); err == nil {
-		release, lockErr := store.LockExclusive(*db)
-		if errors.Is(lockErr, store.ErrLocked) {
-			return fmt.Errorf("another trackd is running on %s", *db)
-		}
-		if release != nil {
-			release()
-		}
+	// A live server holds the lock on <db>.lock, which stays where it is when
+	// the database file is moved aside, so the lock is taken whether or not
+	// the file exists and held until the restore is done.
+	release, err := store.LockExclusive(*db)
+	if err != nil {
+		return openError(*db, err)
 	}
+	defer release()
 	if err := store.Restore(fs.Arg(0), *db); err != nil {
 		return err
 	}
@@ -373,42 +383,68 @@ func cmdExport(args []string) error {
 // The temp file has a fixed name, so a run killed before its cleanup leaves it
 // behind; the next run to the same path takes it over and starts it afresh. An
 // advisory lock on it, held until it is removed, is what tells a leftover from
-// another export still writing there, which is refused.
+// another export still writing there, which is refused. Every write goes
+// through the locked handle, and only once the name is known to point at that
+// very file, so a link or a swapped file at the temp name is never written.
+// Where no lock can be taken, a leftover cannot be told from a running export,
+// so the temp file is created exclusively and any file already there refused.
 func writeNewFile(path string, write func(io.Writer) error) (err error) {
 	if _, err := os.Lstat(path); err == nil {
 		return &os.PathError{Op: "open", Path: path, Err: os.ErrExist}
 	}
 	tmp := path + ".partial"
-	unlock, err := store.LockFile(tmp)
-	if errors.Is(err, store.ErrLocked) {
-		return fmt.Errorf("another export to %s is still running", path)
-	}
-	if err != nil {
+	f, err := store.LockFile(tmp)
+	switch {
+	case errors.Is(err, store.ErrLocked):
+		return fmt.Errorf("another export to %s is still running: %w", path, store.ErrLocked)
+	case errors.Is(err, store.ErrLockUnsupported):
+		if f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err != nil {
+			return err
+		}
+	case err != nil:
 		return err
+	default:
+		if err := lockedFileAt(f, tmp); err != nil {
+			f.Close()
+			return err
+		}
 	}
-	defer unlock()
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
+	// Deferred in this order so the temp file is removed while still locked.
+	defer f.Close()
 	defer func() {
 		if rmErr := os.Remove(tmp); err == nil && rmErr != nil {
 			err = rmErr
 		}
 	}()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
 	if err := write(f); err != nil {
-		f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Link(tmp, path)
+}
+
+// lockedFileAt checks that name is a plain file and the very one f has open.
+func lockedFileAt(f *os.File, name string) error {
+	named, err := os.Lstat(name)
+	if err != nil {
+		return err
+	}
+	held, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !named.Mode().IsRegular() || !os.SameFile(named, held) {
+		return fmt.Errorf("refusing to export: %s is not a plain file this export can take over (a link, or another run's file); remove it and run again", name)
+	}
+	return nil
 }
 
 func cmdImport(args []string) error {
@@ -429,7 +465,21 @@ func cmdImport(args []string) error {
 		return err
 	}
 	defer f.Close()
-	s, err := openLocked(*db)
+	// An import needs a new or empty database, so a dry run against a path
+	// with none gives the same answer against a throwaway one, and writes
+	// nothing at the path.
+	target := *db
+	if *dryRun && format == "linear" {
+		if _, err := os.Stat(*db); errors.Is(err, os.ErrNotExist) {
+			dir, err := os.MkdirTemp("", "trackd-dry-run-")
+			if err != nil {
+				return err
+			}
+			defer func() { _ = os.RemoveAll(dir) }()
+			target = filepath.Join(dir, "trackd.db")
+		}
+	}
+	s, err := openLocked(target)
 	if err != nil {
 		return err
 	}
@@ -585,7 +635,7 @@ func cmdSetting(args []string) error {
 		if err := store.ValidateSetting(key, value); err != nil {
 			return usagef("%v", err)
 		}
-		st, err := openLocked(*db)
+		st, err := openExisting(*db)
 		if err != nil {
 			return err
 		}

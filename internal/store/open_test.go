@@ -23,6 +23,10 @@ func TestOpenAppliesDSNPragmas(t *testing.T) {
 		{"synchronous", "2"},
 		{"foreign_keys", "1"},
 		{"busy_timeout", "5000"},
+		// On macOS plain fsync can leave a commit in the drive's cache; these
+		// two make SQLite ask for a full flush. Other systems ignore them.
+		{"fullfsync", "1"},
+		{"checkpoint_fullfsync", "1"},
 	}
 	for _, tc := range cases {
 		var got string
@@ -37,14 +41,14 @@ func TestOpenAppliesDSNPragmas(t *testing.T) {
 
 func TestDataSourceName(t *testing.T) {
 	rw := dataSourceName("/tmp/a b?c.db", false)
-	want := "file:/tmp/a b%3fc.db?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	want := "file:/tmp/a b%3fc.db?_pragma=journal_mode(WAL)&_pragma=fullfsync(ON)&_pragma=checkpoint_fullfsync(ON)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_txlock=immediate"
 	if rw != want {
 		t.Errorf("read-write DSN =\n%s\nwant\n%s", rw, want)
 	}
 	ro := dataSourceName("/tmp/x.db", true)
 	// A read-only handle must not set a journal mode (that writes to the file)
 	// and must not begin immediate (that fails outright on mode=ro).
-	if !strings.Contains(ro, "mode=ro") || strings.Contains(ro, "journal_mode") || strings.Contains(ro, "_txlock") {
+	if !strings.Contains(ro, "mode=ro") || strings.Contains(ro, "journal_mode") || strings.Contains(ro, "_txlock") || strings.Contains(ro, "fullfsync") {
 		t.Errorf("read-only DSN = %s", ro)
 	}
 }

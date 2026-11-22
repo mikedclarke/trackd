@@ -42,13 +42,13 @@ The data model and the rules trackd enforces on it. The README has the short ver
 - **Milestones** belong to a project and carry an optional target date. Issues
   reference one by name within their project; moving an issue to another
   project clears a milestone that no longer applies. Milestone names are unique
-  among a project's unarchived milestones.
+  among a project's unarchived milestones, compared without case.
 - **Statuses** are workflow states with a type: `triage`, `backlog`, `unstarted`,
   `started`, `completed`, `canceled`. The defaults mirror a common agent workflow
-  (Triage, Backlog, Todo, In Progress, In Review, Done); importing from Linear
-  carries any extra statuses across. Entering a completed or canceled status
-  stamps `completed_at` or `canceled_at`, and leaving it clears the stamp;
-  `started_at` is sticky once set.
+  (Triage, Backlog, Todo, In Progress, In Review, Done, Canceled, Duplicate);
+  importing from Linear carries any extra statuses across. Entering a completed
+  or canceled status stamps `completed_at` or `canceled_at`, and leaving it
+  clears the stamp; `started_at` is sticky once set.
 - **Projects** group issues and carry their own labels, a status from `backlog`,
   `planned`, `started`, `paused`, `completed` and `canceled`, and optional
   `start_date`, `target_date` and `completed_at` dates.
