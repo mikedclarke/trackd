@@ -194,6 +194,7 @@ func cmdServe(args []string) error {
 		Addr:              *addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       server.ReadTimeout,
 		WriteTimeout:      server.WriteTimeout,
 		IdleTimeout:       server.IdleTimeout,
 	}

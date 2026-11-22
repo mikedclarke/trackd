@@ -29,6 +29,9 @@ import (
 // here so the transport settings travel with the handler they protect; main
 // owns the http.Server and wires them.
 const (
+	// ReadTimeout bounds a whole request, body included, so a body sent a
+	// byte at a time cannot hold a connection open forever.
+	ReadTimeout    = 30 * time.Second
 	WriteTimeout   = 60 * time.Second
 	IdleTimeout    = 120 * time.Second
 	ShutdownBudget = 10 * time.Second

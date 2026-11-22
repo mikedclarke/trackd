@@ -619,6 +619,17 @@ func (s *Store) AddComment(issueKey string, in CommentInput, actor string) (*Com
 	return out, created, nil
 }
 
+// GetComment returns one comment by id.
+func (s *Store) GetComment(id int64) (*Comment, error) {
+	var out *Comment
+	err := s.tx(func(tx *sql.Tx) error {
+		var err error
+		out, err = loadComment(tx, id)
+		return err
+	})
+	return out, err
+}
+
 func (s *Store) UpdateComment(id int64, body, actor string) (*Comment, error) {
 	if strings.TrimSpace(body) == "" {
 		return nil, errors.New("comment body is required")
