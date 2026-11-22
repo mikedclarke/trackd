@@ -186,14 +186,19 @@ func TestMCPToolList(t *testing.T) {
 			t.Errorf("save_issue schema missing %s: %s", want, schema)
 		}
 	}
+	// The status set is the store's, so the schema points at it rather than
+	// naming a list that an import or a new status would leave behind.
+	if !strings.Contains(string(schema), "a status name; list_statuses gives the set") || strings.Contains(string(schema), "In Review") {
+		t.Errorf("save_issue status description names a fixed set: %s", schema)
+	}
 }
 
 func TestMCPWorkflow(t *testing.T) {
 	session, st := newMCPSession(t)
-	if _, err := st.EnsureLabel("client-x", ""); err != nil {
+	if _, err := st.EnsureLabel("client-x", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.EnsureLabel("agent-ready", ""); err != nil {
+	if _, err := st.EnsureLabel("agent-ready", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,7 +287,7 @@ func TestMCPAgentLabelAutoApply(t *testing.T) {
 	if err := st.SetSetting("agent_label", "agent"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.EnsureLabel("other", ""); err != nil {
+	if _, err := st.EnsureLabel("other", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -453,7 +458,7 @@ func TestMCPSaveIssueMode(t *testing.T) {
 // caller to say it meant it.
 func TestMCPClearLabelsIsExplicit(t *testing.T) {
 	session, st := newMCPSession(t)
-	if _, err := st.EnsureLabel("alpha", ""); err != nil {
+	if _, err := st.EnsureLabel("alpha", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
 	var issue store.Issue
@@ -664,7 +669,7 @@ func TestMCPRequiresAuth(t *testing.T) {
 
 func TestMCPViews(t *testing.T) {
 	session, st := newMCPSession(t)
-	if _, err := st.EnsureLabel("waiting", ""); err != nil {
+	if _, err := st.EnsureLabel("waiting", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
 	for _, in := range []store.IssueInput{

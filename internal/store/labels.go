@@ -43,8 +43,9 @@ func (s *Store) ListLabels() ([]Label, error) {
 }
 
 // EnsureLabel is the only way a label comes into existence: issue and project
-// writes reject names that are not already here.
-func (s *Store) EnsureLabel(name, color string) (*Label, error) {
+// writes reject names that are not already here. A create or a color change
+// records an event; ensuring a label that is already as asked records none.
+func (s *Store) EnsureLabel(name, color, actor string) (*Label, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("label name is required")
@@ -54,6 +55,15 @@ func (s *Store) EnsureLabel(name, color string) (*Label, error) {
 	}
 	var out Label
 	err := s.tx(func(tx *sql.Tx) error {
+		var before *Label
+		var old Label
+		err := tx.QueryRow("SELECT id, name, color FROM labels WHERE name = ?", name).Scan(&old.ID, &old.Name, &old.Color)
+		switch {
+		case err == nil:
+			before = &old
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
 		id, err := ensureLabel(tx, name)
 		if err != nil {
 			return err
@@ -63,8 +73,17 @@ func (s *Store) EnsureLabel(name, color string) (*Label, error) {
 				return err
 			}
 		}
-		return tx.QueryRow("SELECT id, name, color FROM labels WHERE id = ?", id).
-			Scan(&out.ID, &out.Name, &out.Color)
+		if err := tx.QueryRow("SELECT id, name, color FROM labels WHERE id = ?", id).
+			Scan(&out.ID, &out.Name, &out.Color); err != nil {
+			return err
+		}
+		switch {
+		case before == nil:
+			return recordEvent(tx, "label", out.ID, actor, "label.created", nil, out)
+		case before.Color != out.Color:
+			return recordEvent(tx, "label", out.ID, actor, "label.updated", before, out)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

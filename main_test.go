@@ -136,7 +136,7 @@ func TestSettingSetGroupConflictExitsFive(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"ready", "blocked"} {
-		if _, err := st.EnsureLabel(name, ""); err != nil {
+		if _, err := st.EnsureLabel(name, "", "pm"); err != nil {
 			t.Fatal(err)
 		}
 	}

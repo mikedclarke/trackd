@@ -182,7 +182,7 @@ func TestUIBoardAndIssue(t *testing.T) {
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.EnsureLabel("agent-ready", ""); err != nil {
+	if _, err := st.EnsureLabel("agent-ready", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
 	issue, _, err := st.CreateIssue(store.IssueInput{
@@ -463,5 +463,124 @@ func TestUIBoardStatesItsCap(t *testing.T) {
 	code, body = fetch(t, client, ts.URL+"/?assignee=nobody")
 	if code != http.StatusOK || strings.Contains(body, "showing") || !strings.Contains(body, "0 issues") {
 		t.Errorf("board under the cap = %d, want the plain count", code)
+	}
+}
+
+// Every UI form post, the sign-in included, refuses a cross-site request
+// before it writes anything, and still takes a same-origin post, one through a
+// proxy that forwards its public host, and a non-browser post.
+func TestUIPostsRefuseCrossSite(t *testing.T) {
+	e := newTestEnv(t)
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "target"}, http.StatusCreated, &issue)
+	e.label("ready")
+	e.expect("POST", "/api/v1/views", map[string]any{"name": "Queue", "filter": map[string]any{"labels": []string{"ready"}}}, http.StatusCreated, nil)
+	routes := []struct {
+		path string
+		form url.Values
+	}{
+		{"/ui/login", url.Values{"token": {e.token}}},
+		{"/ui/issue/" + issue.Key + "/comments", url.Values{"body": {"posted"}}},
+		{"/ui/issue/" + issue.Key + "/action", url.Values{"expected_version": {"1"}, "body": {"posted"}}},
+		{"/ui/views", url.Values{"name": {"Second"}, "label": {"ready"}}},
+		{"/ui/view/Queue", url.Values{"name": {"Queue"}, "label": {"ready"}, "description": {"posted"}}},
+	}
+	send := func(path string, form url.Values, headers map[string]string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest("POST", e.url+path, strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "Bearer "+e.token)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	refused := []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site", "Origin": "https://other.example"},
+		{"Origin": "https://evil.example"},
+	}
+	for _, headers := range refused {
+		for _, route := range routes {
+			resp := send(route.path, route.form, headers)
+			if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Set-Cookie") != "" {
+				t.Errorf("POST %s with %v = %d (cookie %v), want 403 and no cookie", route.path, headers, resp.StatusCode, resp.Header.Get("Set-Cookie") != "")
+			}
+		}
+	}
+	if comments, err := e.store.ListComments(issue.Key); err != nil || len(comments) != 0 {
+		t.Errorf("refused posts stored %d comment(s), %v", len(comments), err)
+	}
+	if views, err := e.store.ListViews("pm", true, false); err != nil || len(views) != 1 || views[0].Description != "" {
+		t.Errorf("refused posts changed the views: %+v, %v", views, err)
+	}
+
+	allowed := []map[string]string{
+		{"Sec-Fetch-Site": "same-origin"},
+		{"Origin": "https://tracker.example", "X-Forwarded-Host": "tracker.example"},
+		nil,
+	}
+	for _, headers := range allowed {
+		for _, route := range routes {
+			if resp := send(route.path, route.form, headers); resp.StatusCode == http.StatusForbidden {
+				t.Errorf("POST %s with %v = 403, want it let through", route.path, headers)
+			}
+		}
+	}
+}
+
+// With base_url set, a post whose Origin is that URL's origin is trusted even
+// when a proxy rewrote Host and forwarded nothing.
+func TestUIPostTrustsBaseURLOrigin(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := st.SetSetting("base_url", "https://tracker.example/board"); err != nil {
+		t.Fatal(err)
+	}
+	token, err := st.CreateToken("pm", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, _, err := st.CreateIssue(store.IssueInput{Title: "target"}, "pm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(st, "test").Handler())
+	t.Cleanup(ts.Close)
+	for _, tc := range []struct {
+		origin string
+		want   int
+	}{
+		{"https://tracker.example", http.StatusSeeOther},
+		{"https://tracker.example:8443", http.StatusForbidden},
+		{"http://tracker.example", http.StatusForbidden},
+	} {
+		req, err := http.NewRequest("POST", ts.URL+"/ui/issue/"+issue.Key+"/comments", strings.NewReader(url.Values{"body": {"from the proxy"}}.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Origin", tc.origin)
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Errorf("comment with Origin %s = %d, want %d", tc.origin, resp.StatusCode, tc.want)
+		}
 	}
 }

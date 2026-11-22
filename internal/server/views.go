@@ -26,8 +26,10 @@ func canSeeView(v *store.View, actor, role string) bool {
 }
 
 // visibleView loads a view by name as actor sees it. A private view of
-// someone else's answers not found rather than forbidden, so a name is not
-// confirmed to a token that may not see it.
+// someone else's answers not found rather than forbidden, so a read does not
+// hand its filter to a token that may not see it. The name itself is not
+// secret: view names are unique across every owner, so creating or renaming a
+// view under a taken name is refused whoever holds it.
 func (s *Server) visibleView(name, actor, role string) (*store.View, error) {
 	view, err := s.store.GetView(name)
 	if err != nil {
@@ -86,7 +88,7 @@ type viewCreateReq struct {
 
 func (s *Server) handleCreateView(w http.ResponseWriter, r *http.Request) {
 	var req viewCreateReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -135,7 +137,7 @@ func (p viewPatchReq) empty() bool {
 
 func (s *Server) handlePatchView(w http.ResponseWriter, r *http.Request) {
 	var req viewPatchReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}

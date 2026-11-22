@@ -24,7 +24,7 @@ func openTestStore(t *testing.T) *Store {
 func mustLabel(t *testing.T, s *Store, names ...string) {
 	t.Helper()
 	for _, name := range names {
-		if _, err := s.EnsureLabel(name, ""); err != nil {
+		if _, err := s.EnsureLabel(name, "", "pm"); err != nil {
 			t.Fatalf("label %s: %v", name, err)
 		}
 	}

@@ -124,7 +124,7 @@ type mcpSaveIssueIn struct {
 	Description        *string   `json:"description,omitempty" jsonschema:"issue description in markdown; on update it needs replace_description, because descriptions are append-only"`
 	AppendDescription  string    `json:"append_description,omitempty" jsonschema:"text to add to the end of the description, the safe way to add to another agent's notes"`
 	ReplaceDescription bool      `json:"replace_description,omitempty" jsonschema:"allow description to overwrite an existing description instead of appending; admin tokens only"`
-	Status             *string   `json:"status,omitempty" jsonschema:"status name: Triage, Backlog, Todo, In Progress, In Review, Done, Canceled or Duplicate"`
+	Status             *string   `json:"status,omitempty" jsonschema:"a status name; list_statuses gives the set"`
 	Priority           *int      `json:"priority,omitempty" jsonschema:"priority 0-4: 0 none, 1 urgent, 2 high, 3 medium, 4 low"`
 	Project            *string   `json:"project,omitempty" jsonschema:"project slug; empty string clears"`
 	Parent             *string   `json:"parent,omitempty" jsonschema:"parent issue key; empty string clears"`
@@ -237,7 +237,7 @@ type mcpSaveViewIn struct {
 type mcpListActivityIn struct {
 	Since   string   `json:"since,omitempty" jsonschema:"only events at or after this RFC3339 timestamp"`
 	AfterID int64    `json:"after_id,omitempty" jsonschema:"only events with an id above this, the cursor for paging forward"`
-	Entity  string   `json:"entity,omitempty" jsonschema:"restrict to one entity kind: issue, project, milestone, token, setting or view"`
+	Entity  string   `json:"entity,omitempty" jsonschema:"restrict to one entity kind: issue, project, milestone, label, token, setting or view"`
 	Keys    []string `json:"keys,omitempty" jsonschema:"issue keys whose events to read, up to 100, so several issues' histories come back in one call"`
 	Limit   int      `json:"limit,omitempty" jsonschema:"maximum events, default 100, capped at 1000"`
 }
@@ -375,7 +375,7 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 			if in.AppendDescription != "" {
 				return nil, store.Issue{}, mcpError(errors.New("mode create takes description, not append_description"))
 			}
-			createLabels, err := s.agentLabel(role, sliceOr(labels))
+			createLabels, err := s.agentLabel(tokenActor, role, sliceOr(labels))
 			if err != nil {
 				return nil, store.Issue{}, mcpError(err)
 			}
@@ -706,7 +706,7 @@ func (s *Server) newMCPServer(tokenActor, role string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_activity",
 		Annotations: readOnlyTool(),
-		Description: "Read the audit feed oldest first, filtered by timestamp, entity kind (issue, project, milestone, token, setting, view), issue keys or an after_id cursor, so a caller can page forward without missing an event.",
+		Description: "Read the audit feed oldest first, filtered by timestamp, entity kind (issue, project, milestone, label, token, setting, view), issue keys or an after_id cursor, so a caller can page forward without missing an event.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in mcpListActivityIn) (*mcp.CallToolResult, mcpActivityOut, error) {
 		events, err := s.store.ListAllEvents(store.EventFilter{
 			Since:     in.Since,

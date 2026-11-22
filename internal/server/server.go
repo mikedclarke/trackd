@@ -119,17 +119,18 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("/api/", s.auth(api))
 	mux.Handle("/mcp", s.auth(s.mcpHandler()))
+	crossSite := s.crossSiteGuard()
 	mux.HandleFunc("GET /{$}", s.uiAuth(s.uiBoard))
 	mux.HandleFunc("GET /ui/issue/{key}", s.uiAuth(s.uiIssue))
-	mux.HandleFunc("POST /ui/issue/{key}/comments", s.uiAuth(s.uiIssueComment))
-	mux.HandleFunc("POST /ui/issue/{key}/action", s.uiAuth(s.uiIssueAction))
+	mux.HandleFunc("POST /ui/issue/{key}/comments", crossSite(s.uiAuth(s.uiIssueComment)))
+	mux.HandleFunc("POST /ui/issue/{key}/action", crossSite(s.uiAuth(s.uiIssueAction)))
 	mux.HandleFunc("GET /ui/views/new", s.uiAuth(s.uiViewNew))
-	mux.HandleFunc("POST /ui/views", s.uiAuth(s.uiViewCreate))
+	mux.HandleFunc("POST /ui/views", crossSite(s.uiAuth(s.uiViewCreate)))
 	mux.HandleFunc("GET /ui/view/{name}", s.uiAuth(s.uiView))
 	mux.HandleFunc("GET /ui/view/{name}/edit", s.uiAuth(s.uiViewEdit))
-	mux.HandleFunc("POST /ui/view/{name}", s.uiAuth(s.uiViewUpdate))
+	mux.HandleFunc("POST /ui/view/{name}", crossSite(s.uiAuth(s.uiViewUpdate)))
 	mux.HandleFunc("GET /ui/login", s.uiLoginForm)
-	mux.HandleFunc("POST /ui/login", s.uiLoginSubmit)
+	mux.HandleFunc("POST /ui/login", crossSite(s.uiLoginSubmit))
 	mux.HandleFunc("GET /ui/logout", s.uiLogout)
 	mux.HandleFunc("GET /ui/static/style.css", s.uiStyle)
 
@@ -139,8 +140,12 @@ func (s *Server) Handler() http.Handler {
 		s.checkIntegrity()
 		go s.tickHealth(context.Background())
 	}
-	return logRequests(jsonMuxErrors(mux))
+	return logRequests(jsonMuxErrors(http.MaxBytesHandler(mux, maxRequestBody)))
 }
+
+// maxRequestBody caps every request body, REST, MCP and web form alike, so no
+// route can be the one that forgot.
+const maxRequestBody = 1 << 20
 
 type ctxKey int
 
@@ -202,9 +207,9 @@ func tokenRole(r *http.Request) string {
 // when the caller is a non-admin token, so an operator can mark every
 // agent-created issue without the agent naming the label itself. It is a no-op
 // when the setting is empty or the caller is an admin, and never adds a label a
-// caller already passed. The label is created if missing because a create
-// rejects labels that do not already exist.
-func (s *Server) agentLabel(role string, labels []string) ([]string, error) {
+// caller already passed. The label is created if missing, as a write by the
+// calling token, because a create rejects labels that do not already exist.
+func (s *Server) agentLabel(tokenName, role string, labels []string) ([]string, error) {
 	name, err := s.store.Setting("agent_label")
 	if err != nil {
 		return nil, err
@@ -213,7 +218,7 @@ func (s *Server) agentLabel(role string, labels []string) ([]string, error) {
 	if name == "" || role == roleAdmin {
 		return labels, nil
 	}
-	label, err := s.store.EnsureLabel(name, "")
+	label, err := s.store.EnsureLabel(name, "", tokenName)
 	if err != nil {
 		return nil, err
 	}
@@ -338,18 +343,6 @@ func (s *Server) healthStart() bool {
 	}
 	s.healthRunning = true
 	return true
-}
-
-// RunHealth runs the integrity check now and every ten minutes until ctx is
-// canceled. Handler already starts the checker on a background context, so
-// this is only for a caller that wants to own its lifetime, and it has to be
-// called before Handler to win: the second starter returns immediately.
-func (s *Server) RunHealth(ctx context.Context) {
-	if !s.healthStart() {
-		return
-	}
-	s.checkIntegrity()
-	s.tickHealth(ctx)
 }
 
 func (s *Server) tickHealth(ctx context.Context) {
@@ -487,7 +480,7 @@ func logRequests(next http.Handler) http.Handler {
 		if name == "" {
 			name = "-"
 		}
-		log.Printf("%s %s %d %s actor=%s", r.Method, r.URL.Path, rec.status,
+		log.Printf("%s %s %d %s actor=%s", r.Method, r.URL.EscapedPath(), rec.status,
 			time.Since(start).Round(time.Millisecond), name)
 	})
 }
@@ -588,6 +581,10 @@ var errAdminOnly = errors.New("replacing a description needs an admin token; age
 // operator has actor_from_token on.
 var errActorNotSelf = errors.New("naming another actor needs an admin token while actor_from_token is on; omit actor to write as this token")
 
+// errCommentAuthor refuses an edit of someone else's comment. The comment
+// keeps its author's name, so an edit by anyone else would put words in it.
+var errCommentAuthor = errors.New("only the comment's author or an admin token can edit it")
+
 type errorBody struct {
 	Error string `json:"error"`
 	Code  string `json:"code"`
@@ -627,7 +624,7 @@ func classify(err error) (int, string) {
 		return http.StatusNotFound, codeNotFound
 	case errors.Is(err, store.ErrBusy):
 		return http.StatusServiceUnavailable, codeBusy
-	case errors.Is(err, errAdminOnly), errors.Is(err, errViewOwner), errors.Is(err, errActorNotSelf):
+	case errors.Is(err, errAdminOnly), errors.Is(err, errViewOwner), errors.Is(err, errActorNotSelf), errors.Is(err, errCommentAuthor):
 		return http.StatusForbidden, codeForbidden
 	case isInternal(err):
 		return http.StatusInternalServerError, codeInternal
@@ -677,16 +674,16 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 func storeErrorBody(r *http.Request, err error) (int, errorBody) {
 	status, code := classify(err)
 	if status == http.StatusInternalServerError {
-		log.Printf("%s %s: internal error: %v", r.Method, r.URL.Path, err)
+		log.Printf("%s %s: internal error: %v", r.Method, r.URL.EscapedPath(), err)
 		return status, errorBody{Error: "internal error", Code: code}
 	}
 	return status, errorBody{Error: err.Error(), Code: code}
 }
 
 // decodeBody strictly decodes a JSON request body, rejecting unknown fields so
-// agent typos fail loudly instead of being silently ignored.
-func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+// agent typos fail loudly instead of being silently ignored. The size cap is
+// Handler's, so an oversized body fails here as "request body too large".
+func decodeBody(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
