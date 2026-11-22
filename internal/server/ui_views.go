@@ -49,8 +49,8 @@ func noticeFrom(q url.Values) *uiNotice {
 	case "saved":
 		n.Text = n.Key + " updated."
 	case "conflict":
-		n.Text = n.Key + " changed since this page was loaded, so the change was not applied" +
-			"; a reply typed with it was still saved. Reload and try again."
+		n.Text = n.Key + " changed since this page was loaded, so nothing was saved" +
+			", a reply typed with it included. Reload and try again."
 	}
 	return n
 }
@@ -79,10 +79,13 @@ func withNotice(back string, n uiNotice) string {
 }
 
 // safeBack accepts a same-site path to return to after a form post; anything
-// else, including a scheme or a protocol-relative host, falls back to the
-// board.
+// else, including a scheme, a protocol-relative host or a control character
+// (which url.Parse refuses, and which a browser may strip into "//host"),
+// falls back to the board.
 func safeBack(raw string) string {
-	if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") && !strings.ContainsAny(raw, "\\\r\n") {
+	u, err := url.Parse(raw)
+	if err == nil && u.Scheme == "" && u.Host == "" &&
+		strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") && !strings.Contains(raw, "\\") {
 		return raw
 	}
 	return "/"
@@ -246,18 +249,15 @@ func describeViewFilter(f store.ViewFilter) []string {
 }
 
 // uiIssueAction is the one write path behind every row form and the issue
-// page's own action box: an optional reply, then a patch made of the fields
-// the form set plus a quick action if one was pressed. The form and the quick
+// page's own action box: a patch made of the fields the form set plus a quick
+// action if one was pressed, then an optional reply. The form and the quick
 // action are checked before anything is written, so a refused form leaves
 // the issue untouched, reply included. The patch carries the version the page
 // was rendered with, so a change that lost a race answers with a conflict
-// notice rather than overwriting; the reply is posted before the patch
-// because a reply is never wrong, and it survives a conflict.
+// notice rather than overwriting. The patch runs before the reply so that a
+// conflict stores nothing: a reply kept beside a refused change would be
+// posted a second time when the person reloads and submits again.
 func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r) {
-		http.Error(w, "cross-origin form post refused", http.StatusForbidden)
-		return
-	}
 	key := r.PathValue("key")
 	back := safeBack(r.PostFormValue("back"))
 	if back == "/" {
@@ -287,7 +287,25 @@ func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 		patch = mergePatch(patch, q.Patch())
 	}
 	body := strings.ReplaceAll(r.PostFormValue("body"), "\r\n", "\n")
-	if strings.TrimSpace(body) != "" {
+	reply := strings.TrimSpace(body) != ""
+	if patchEmpty(patch) && !reply {
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	if !patchEmpty(patch) {
+		if _, err := s.store.UpdateIssue(key, patch, actor); err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				http.NotFound(w, r)
+			case errors.Is(err, store.ErrVersionConflict):
+				http.Redirect(w, r, withNotice(back, uiNotice{Kind: "conflict", Key: key}), http.StatusSeeOther)
+			default:
+				fail(err.Error())
+			}
+			return
+		}
+	}
+	if reply {
 		if _, _, err := s.store.AddComment(key, store.CommentInput{Body: body}, actor); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				http.NotFound(w, r)
@@ -296,25 +314,6 @@ func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 			fail(err.Error())
 			return
 		}
-	}
-	if patchEmpty(patch) {
-		if strings.TrimSpace(body) == "" {
-			http.Redirect(w, r, back, http.StatusSeeOther)
-			return
-		}
-		http.Redirect(w, r, withNotice(back, uiNotice{Kind: "saved", Key: key}), http.StatusSeeOther)
-		return
-	}
-	if _, err := s.store.UpdateIssue(key, patch, actor); err != nil {
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			http.NotFound(w, r)
-		case errors.Is(err, store.ErrVersionConflict):
-			http.Redirect(w, r, withNotice(back, uiNotice{Kind: "conflict", Key: key}), http.StatusSeeOther)
-		default:
-			fail(err.Error())
-		}
-		return
 	}
 	http.Redirect(w, r, withNotice(back, uiNotice{Kind: "saved", Key: key}), http.StatusSeeOther)
 }
@@ -390,7 +389,7 @@ type viewForm struct {
 	OrderOptions []string
 }
 
-func (s *Server) newViewForm(r *http.Request) (*viewForm, error) {
+func (s *Server) newViewForm() (*viewForm, error) {
 	f := &viewForm{Shared: true, StatusTypes: []string{"triage", "backlog", "unstarted", "started", "completed", "canceled"},
 		OrderOptions: []string{"updated", "created", "priority"}}
 	var err error
@@ -432,7 +431,7 @@ func (s *Server) renderViewForm(w http.ResponseWriter, r *http.Request, f *viewF
 }
 
 func (s *Server) uiViewNew(w http.ResponseWriter, r *http.Request) {
-	f, err := s.newViewForm(r)
+	f, err := s.newViewForm()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -451,7 +450,7 @@ func (s *Server) uiViewEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errViewOwner.Error(), http.StatusForbidden)
 		return
 	}
-	f, err := s.newViewForm(r)
+	f, err := s.newViewForm()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -530,15 +529,11 @@ func nonEmpty(values []string) []string {
 }
 
 func (s *Server) uiViewCreate(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r) {
-		http.Error(w, "cross-origin form post refused", http.StatusForbidden)
-		return
-	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	f, err := s.newViewForm(r)
+	f, err := s.newViewForm()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -563,10 +558,6 @@ func (s *Server) uiViewCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiViewUpdate(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r) {
-		http.Error(w, "cross-origin form post refused", http.StatusForbidden)
-		return
-	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -590,7 +581,7 @@ func (s *Server) uiViewUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	f, err := s.newViewForm(r)
+	f, err := s.newViewForm()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

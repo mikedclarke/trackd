@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/mikedclarke/trackd/internal/store"
 )
@@ -869,6 +873,50 @@ func TestLabelOperations(t *testing.T) {
 	}, http.StatusConflict, codeConflict)
 }
 
+// Creating or recoloring a label is audited like any other write, the
+// server's own agent_label creation included; ensuring a label that is
+// already as asked records nothing.
+func TestLabelWritesAreAudited(t *testing.T) {
+	e := newTestEnv(t)
+	for _, body := range []map[string]any{
+		{"name": "urgent", "color": "#f00"},
+		{"name": "URGENT"},
+		{"name": "urgent", "color": "#f00"},
+		{"name": "urgent", "color": "#0f0", "actor": "builder"},
+	} {
+		if resp := e.do("POST", "/api/v1/labels", body, nil); resp.StatusCode != http.StatusCreated {
+			t.Errorf("POST /labels %v = %d, want 201", body, resp.StatusCode)
+		}
+	}
+	if err := e.store.SetSetting("agent_label", "agent-made"); err != nil {
+		t.Fatal(err)
+	}
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "tagged"}, http.StatusCreated, nil)
+
+	var feed eventListResponse
+	if resp := e.do("GET", "/api/v1/events?entity=label", nil, &feed); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /events?entity=label = %d, want 200", resp.StatusCode)
+	}
+	want := []string{"label.created urgent pm", "label.updated urgent builder", "label.created agent-made pm"}
+	var got []string
+	for _, ev := range feed.Events {
+		got = append(got, ev.Action+" "+ev.EntityKey+" "+ev.Actor)
+	}
+	if !slicesEqual(got, want) {
+		t.Fatalf("label events = %q, want %q", got, want)
+	}
+	var before, after store.Label
+	if err := json.Unmarshal(feed.Events[1].Before, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(feed.Events[1].After, &after); err != nil {
+		t.Fatal(err)
+	}
+	if before.Color != "#f00" || after.Color != "#0f0" || feed.Events[0].Before != nil {
+		t.Errorf("recolor event before %+v after %+v; create before = %s", before, after, feed.Events[0].Before)
+	}
+}
+
 func TestCommentThreadAndEdit(t *testing.T) {
 	e := newTestEnv(t)
 	e.expect("POST", "/api/v1/issues", map[string]any{"title": "discussed"}, http.StatusCreated, nil)
@@ -906,6 +954,59 @@ func TestCommentThreadAndEdit(t *testing.T) {
 	e.expectError("PATCH", "/api/v1/comments/999", map[string]any{"body": "x"}, http.StatusNotFound, codeNotFound)
 	e.expectError("PATCH", "/api/v1/comments/abc", map[string]any{"body": "x"}, http.StatusBadRequest, codeValidation)
 	e.expectError("PATCH", fmt.Sprintf("/api/v1/comments/%d", parent.ID), map[string]any{"body": " "}, http.StatusBadRequest, codeValidation)
+}
+
+// A comment is edited by the token that wrote it or by an admin. The check
+// goes by the token's name, so naming the author in the request's actor field
+// does not get another agent in.
+func TestCommentEditNeedsAuthorOrAdmin(t *testing.T) {
+	e := newTestEnv(t)
+	admin := e.adminToken()
+	alex, err := e.store.CreateToken("alex", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "discussed"}, http.StatusCreated, &issue)
+
+	cases := []struct {
+		name   string
+		editor string
+		actor  string
+		want   int
+	}{
+		{"another agent", e.token, "", http.StatusForbidden},
+		{"another agent naming the author", e.token, "alex", http.StatusForbidden},
+		{"the author", alex, "", http.StatusOK},
+		{"an admin", admin, "", http.StatusOK},
+	}
+	for _, tc := range cases {
+		var c store.Comment
+		e.withToken(alex, func() {
+			e.expect("POST", "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": "approved: ship after the backup check"}, http.StatusCreated, &c)
+		})
+		var reply errorBody
+		e.withToken(tc.editor, func() {
+			resp := e.do("PATCH", fmt.Sprintf("/api/v1/comments/%d", c.ID), map[string]any{"body": "approved: ship now", "actor": tc.actor}, &reply)
+			if resp.StatusCode != tc.want {
+				t.Errorf("%s: edit = %d, want %d", tc.name, resp.StatusCode, tc.want)
+			}
+		})
+		wantBody := "approved: ship now"
+		if tc.want == http.StatusForbidden {
+			wantBody = c.Body
+			if reply.Code != codeForbidden {
+				t.Errorf("%s: refusal code = %q, want %q", tc.name, reply.Code, codeForbidden)
+			}
+		}
+		got, err := e.store.GetComment(c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Body != wantBody || got.Actor != "alex" {
+			t.Errorf("%s: the comment reads %q by %q, want %q by alex", tc.name, got.Body, got.Actor, wantBody)
+		}
+	}
 }
 
 func TestEventFeeds(t *testing.T) {
@@ -1193,6 +1294,74 @@ func TestIssueProjectAssignment(t *testing.T) {
 		http.StatusUnprocessableEntity, codeInvalidRef)
 }
 
+// One body cap covers every route: REST, the MCP endpoint and the web forms
+// all refuse a body over 1 MiB before anything is stored.
+func TestRequestBodyCapCoversEveryRoute(t *testing.T) {
+	e := newTestEnv(t)
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "target"}, http.StatusCreated, &issue)
+	big := strings.Repeat("x", 2<<20)
+
+	got := e.expectError("POST", "/api/v1/issues", map[string]any{"title": "big", "description": big}, http.StatusBadRequest, codeValidation)
+	if !strings.Contains(got.Error, "request body too large") {
+		t.Errorf("REST refusal = %q, want it to name the size", got.Error)
+	}
+
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   e.url + "/mcp",
+		HTTPClient: &http.Client{Transport: &authTransport{token: e.token, base: http.DefaultTransport}},
+	}
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil).Connect(context.Background(), transport, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "save_issue", Arguments: map[string]any{
+		"mode": "create", "title": "big", "description": big,
+	}})
+	if err == nil && !res.IsError {
+		t.Error("MCP save_issue over the cap succeeded")
+	}
+
+	form := url.Values{"body": {big}}
+	req, err := http.NewRequest("POST", e.url+"/ui/issue/"+issue.Key+"/comments", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+e.token)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if n, err := e.store.CountIssues(store.IssueFilter{}); err != nil || n != 1 {
+		t.Errorf("issues after the refused creates = %d, %v; want 1", n, err)
+	}
+	if comments, err := e.store.ListComments(issue.Key); err != nil || len(comments) != 0 {
+		t.Errorf("UI comment over the cap was stored: %d, %v", len(comments), err)
+	}
+}
+
+// A per-entity feed clamps limit to the same maximum the global feed uses.
+func TestEntityEventsLimitIsClamped(t *testing.T) {
+	e := newTestEnv(t)
+	var issue store.Issue
+	e.expect("POST", "/api/v1/issues", map[string]any{"title": "busy"}, http.StatusCreated, &issue)
+	for i := range maxEventLimit {
+		title := fmt.Sprintf("busy %d", i)
+		if _, err := e.store.UpdateIssue(issue.Key, store.IssuePatch{Title: &title}, "pm"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var feed eventListResponse
+	e.expect("GET", "/api/v1/issues/"+issue.Key+"/events?limit=100000", nil, http.StatusOK, &feed)
+	if len(feed.Events) != maxEventLimit {
+		t.Errorf("issue events with limit=100000 = %d, want %d", len(feed.Events), maxEventLimit)
+	}
+}
+
 func TestMuxErrorsAreJSON(t *testing.T) {
 	e := newTestEnv(t)
 	got := e.expectError("GET", "/api/v1/nonsense", nil, http.StatusNotFound, codeNotFound)
@@ -1228,6 +1397,7 @@ func TestClassifyErrors(t *testing.T) {
 		{"integrity", fmt.Errorf("x: %w", store.ErrIntegrity), http.StatusInternalServerError, codeInternal},
 		{"filesystem", &os.PathError{Op: "open", Path: "/nope", Err: errors.New("no such file")}, http.StatusInternalServerError, codeInternal},
 		{"actor not self", errActorNotSelf, http.StatusForbidden, codeForbidden},
+		{"comment author", errCommentAuthor, http.StatusForbidden, codeForbidden},
 		{"plain validation", errors.New("priority 9 out of range 0-4"), http.StatusBadRequest, codeValidation},
 		{"request context gone", fmt.Errorf("list: %w", context.Canceled), http.StatusInternalServerError, codeInternal},
 		{"transaction gone", fmt.Errorf("update: %w", sql.ErrTxDone), http.StatusInternalServerError, codeInternal},
@@ -1479,4 +1649,20 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// The request log writes the path as it was sent, so an encoded line break in
+// a path cannot start a forged line of its own.
+func TestRequestLogKeepsPathEscaped(t *testing.T) {
+	e := newTestEnv(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	req := httptest.NewRequest("GET", "/api/v1/issues/TSK-1%0Aforged", nil)
+	req.Header.Set("Authorization", "Bearer "+e.token)
+	e.server.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	out := buf.String()
+	if n := strings.Count(out, "\n"); n != 1 || !strings.Contains(out, "/api/v1/issues/TSK-1%0Aforged") {
+		t.Errorf("request log wrote %d line(s), want one carrying the escaped path:\n%s", n, out)
+	}
 }

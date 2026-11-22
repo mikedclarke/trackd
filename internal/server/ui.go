@@ -373,14 +373,8 @@ func (s *Server) uiIssue(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// uiIssueComment accepts the issue page's comment form. The session cookie is
-// SameSite=Lax, so a cross-site POST never carries it; checking Origin against
-// the host we were addressed as is the second lock on the same door.
+// uiIssueComment accepts the issue page's comment form.
 func (s *Server) uiIssueComment(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r) {
-		http.Error(w, "cross-origin form post refused", http.StatusForbidden)
-		return
-	}
 	key := r.PathValue("key")
 	back := "/ui/issue/" + url.PathEscape(key)
 	// Browsers form-post textarea lines as CRLF; store the comment with the
@@ -402,6 +396,36 @@ func (s *Server) uiIssueComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, back+"#comments", http.StatusSeeOther)
+}
+
+// crossSiteGuard wraps every UI form post, the sign-in included. SameSite on
+// the session cookie is no guard here: other hosts and ports on the same site
+// can still send it, and the sign-in needs no cookie at all. A post passes
+// when net/http's cross-origin check does, which reads Sec-Fetch-Site and
+// then Origin against Host, or when its Origin names the public host a
+// reverse proxy forwarded for, which that check cannot see.
+func (s *Server) crossSiteGuard() func(http.HandlerFunc) http.HandlerFunc {
+	protection := http.NewCrossOriginProtection()
+	// A proxy that rewrites Host and forwards nothing still serves the
+	// operator's public URL, so that origin is trusted outright.
+	if base, err := s.store.Setting("base_url"); err != nil {
+		log.Printf("cross-site guard: read base_url: %v", err)
+	} else if u, err := url.Parse(base); err == nil && u.Host != "" {
+		if err := protection.AddTrustedOrigin(u.Scheme + "://" + u.Host); err != nil {
+			log.Printf("cross-site guard: base_url %q: %v", base, err)
+		}
+	}
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if protection.Check(r) != nil {
+				if origin := r.Header.Get("Origin"); origin == "" || !sameOrigin(origin, r) {
+					http.Error(w, "cross-origin form post refused", http.StatusForbidden)
+					return
+				}
+			}
+			next(w, r)
+		}
+	}
 }
 
 // sameOrigin reports whether a browser-supplied Origin names this server: the

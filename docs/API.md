@@ -20,7 +20,9 @@ per-entity event feeds under projects and milestones,
 `POST /api/v1/labels` creates a label or recolors an existing one. `color` is
 optional and must be a hex color, `#rgb` or `#rrggbb` in either case; anything
 else is a 422 `invalid_ref`, and an empty `color` leaves the label's own color
-alone.
+alone. A create records a `label.created` event and a color change a
+`label.updated` one, with the label's name as `entity_key`; a request that
+changes nothing records nothing.
 
 ## Issue list filters
 
@@ -43,8 +45,8 @@ with or without fractional seconds, or a bare `YYYY-MM-DD` (midnight UTC), and
 compare as instants; anything else is a 400 `validation`, over MCP as over REST.
 Assignees are free-form names, so an unknown one is simply an empty result.
 `GET /api/v1/events` takes `entity` of `issue`, `project`, `milestone`,
-`token`, `setting` or `view` (a comment or a relation is recorded against its
-issue); any other value is a 404. It also takes `key`, an issue key,
+`label`, `token`, `setting` or `view` (a comment or a relation is recorded
+against its issue); any other value is a 404. It also takes `key`, an issue key,
 repeatable up to 100 times: the feed is then those issues' events, oldest
 first with the same `after_id` cursor, so several histories come back in one
 request. A key that names no issue is a 422 `invalid_ref`, and `key` with an
@@ -65,9 +67,11 @@ one-tap buttons the web board shows on each row of the view; each must change
 something and name a real status and real labels. `shared` defaults to true.
 
 `POST /api/v1/views` creates one (201; a name already in use among live views
-is a 409 `conflict`, case-insensitively). `GET /api/v1/views` lists the views
-the token may see: every shared view plus its own, or every view for an admin
-token; `?archived=true` includes archived ones. `GET /api/v1/views/{name}`
+is a 409 `conflict`, case-insensitively). A private view's name is not secret:
+it still reserves the name, so that 409 answers whoever holds it.
+`GET /api/v1/views` lists the views the token may see: every shared view plus
+its own, or every view for an admin token; `?archived=true` includes archived
+ones. `GET /api/v1/views/{name}`
 reads one; a private view of another token's is a 404. `PATCH` changes only
 the fields it includes, and `filter` and `quick_actions` are replaced whole;
 `"archived": true` archives the view, which hides it, frees its name and stops
@@ -102,6 +106,12 @@ token (clearing a description is that field with `"description": ""` beside it,
 so it is the same rule); `expected_version` guards against a lost update. There
 are no DELETE endpoints by design.
 
+An `idempotency_key` on an issue create or a comment makes a repeat return the
+stored issue or comment (200 rather than 201) instead of adding another: a key
+names the thing, not the request text, so a repeat whose other fields differ
+still returns what the key first stored. A comment key already used on another
+issue is a 409 `conflict`, because returning that comment would drop this one.
+
 `PATCH /api/v1/issues` applies several issue updates in one request:
 `{"updates": [{"key": "ACME-1", "status": "Done"}, {"key": "ACME-2",
 "add_labels": ["ready"], "expected_version": 4}, ...]}`, at most 100 items,
@@ -134,9 +144,9 @@ with and the exit code the CLI turns it into.
 |---|---|---|---|
 | `validation` | 400 | 2 | The request itself is malformed: an unknown JSON field or query parameter, a body that is not JSON, a value out of range, a patch with nothing in it, an unknown enum value such as a relation type or a project status |
 | `unauthorized` | 401 | 4 | No bearer token, or one that is unknown or revoked |
-| `forbidden` | 403 | 4 | A real write this token may not make: replacing or clearing a description needs an `admin` token, changing a view needs its owner or an `admin` token, and with `actor_from_token` on, naming an `actor` other than the token's own needs an `admin` token |
+| `forbidden` | 403 | 4 | A real write this token may not make: replacing or clearing a description needs an `admin` token, changing a view needs its owner or an `admin` token, editing a comment needs the token that wrote it (the one whose name is the comment's `actor`) or an `admin` token, and with `actor_from_token` on, naming an `actor` other than the token's own needs an `admin` token |
 | `not_found` | 404 | 3 | The issue, project, milestone, comment or view does not exist, or a view is private to another token or archived |
-| `conflict` | 409 | 5 | A uniqueness or exclusivity rule: a project name or slug already taken, a milestone name already used in its project, a view name already in use, two labels from one exclusive group |
+| `conflict` | 409 | 5 | A uniqueness or exclusivity rule: a project name or slug already taken, a milestone name already used in its project, a view name already in use, two labels from one exclusive group, a comment `idempotency_key` already used on another issue |
 | `version_conflict` | 409 | 5 | `expected_version` did not match, so another writer got there first |
 | `description_replace` | 409 | 5 | The update would overwrite a non-empty description and did not carry `replace_description` |
 | `invalid_ref` | 422 | 2 | A value that has to resolve or has a fixed shape does not: a status, project, milestone, parent or label that names nothing; a priority outside 0-4; a title or name that is empty or over 500 characters; a label `color` that is not `#rgb` or `#rrggbb`; a view with an empty filter, a bad `updated_within` window, or a quick action that changes nothing |

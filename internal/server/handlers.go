@@ -195,7 +195,7 @@ type issueCreateReq struct {
 
 func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 	var req issueCreateReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -204,7 +204,7 @@ func (s *Server) handleCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err)
 		return
 	}
-	labels, err := s.agentLabel(tokenRole(r), req.Labels)
+	labels, err := s.agentLabel(tokenName(r), tokenRole(r), req.Labels)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -271,7 +271,7 @@ func (p issuePatchReq) empty() bool {
 
 func (s *Server) handlePatchIssue(w http.ResponseWriter, r *http.Request) {
 	var req issuePatchReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -356,7 +356,7 @@ type issueBatchResponse struct {
 // whole is an error.
 func (s *Server) handleBatchPatchIssues(w http.ResponseWriter, r *http.Request) {
 	var req issueBatchReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -397,7 +397,7 @@ type descriptionAppendReq struct {
 // overwrite each other.
 func (s *Server) handleAppendDescription(w http.ResponseWriter, r *http.Request) {
 	var req descriptionAppendReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -439,7 +439,7 @@ type commentCreateReq struct {
 
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	var req commentCreateReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -476,13 +476,22 @@ func (s *Server) handlePatchComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req commentPatchReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
 	act, err := s.actor(r, req.Actor)
 	if err != nil {
 		writeStoreError(w, r, err)
+		return
+	}
+	existing, err := s.store.GetComment(id)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	if tokenRole(r) != roleAdmin && existing.Actor != tokenName(r) {
+		writeStoreError(w, r, errCommentAuthor)
 		return
 	}
 	comment, err := s.store.UpdateComment(id, req.Body, act)
@@ -522,7 +531,7 @@ type relationReq struct {
 // caller's goal is the state, and that state is already reached.
 func (s *Server) handleSetRelation(w http.ResponseWriter, r *http.Request) {
 	var req relationReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -653,7 +662,7 @@ func (s *Server) writeEntityEvents(w http.ResponseWriter, r *http.Request, entit
 		writeValidation(w, err.Error())
 		return
 	}
-	events, err := s.store.ListEvents(entity, id, limit)
+	events, err := s.store.ListEvents(entity, id, clamp(limit, defaultEventLimit, maxEventLimit))
 	if err != nil {
 		writeStoreError(w, r, err)
 		return
@@ -698,7 +707,7 @@ type projectCreateReq struct {
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	var req projectCreateReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -753,7 +762,7 @@ func (p projectPatchReq) empty() bool {
 
 func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 	var req projectPatchReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -815,7 +824,7 @@ type milestoneCreateReq struct {
 
 func (s *Server) handleCreateMilestone(w http.ResponseWriter, r *http.Request) {
 	var req milestoneCreateReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -866,7 +875,7 @@ func (s *Server) handlePatchMilestone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req milestonePatchReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
@@ -911,15 +920,21 @@ func (s *Server) handleListLabels(w http.ResponseWriter, r *http.Request) {
 type labelReq struct {
 	Name  string `json:"name"`
 	Color string `json:"color"`
+	Actor string `json:"actor"`
 }
 
 func (s *Server) handleEnsureLabel(w http.ResponseWriter, r *http.Request) {
 	var req labelReq
-	if err := decodeBody(w, r, &req); err != nil {
+	if err := decodeBody(r, &req); err != nil {
 		writeValidation(w, err.Error())
 		return
 	}
-	label, err := s.store.EnsureLabel(req.Name, req.Color)
+	act, err := s.actor(r, req.Actor)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	label, err := s.store.EnsureLabel(req.Name, req.Color, act)
 	if err != nil {
 		writeStoreError(w, r, err)
 		return

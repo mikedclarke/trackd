@@ -38,7 +38,7 @@ func post(t *testing.T, client *http.Client, target string, form url.Values) (in
 func seedView(t *testing.T, st *store.Store) *store.View {
 	t.Helper()
 	for _, name := range []string{"waiting", "ready"} {
-		if _, err := st.EnsureLabel(name, ""); err != nil {
+		if _, err := st.EnsureLabel(name, "", "pm"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -148,7 +148,7 @@ func TestUIRowActions(t *testing.T) {
 		t.Fatalf("comments = %+v, %v", comments, err)
 	}
 	events, err := st.ListEvents("issue", issue.ID, 10)
-	if err != nil || events[0].Action != "issue.updated" || events[0].Actor != "pm" || events[1].Action != "comment.created" {
+	if err != nil || events[0].Action != "comment.created" || events[1].Action != "issue.updated" || events[1].Actor != "pm" {
 		t.Errorf("events = %+v, %v", events, err)
 	}
 	// The notice renders on the page it points at.
@@ -173,8 +173,9 @@ func TestUIRowActions(t *testing.T) {
 		t.Errorf("after apply = %+v", after)
 	}
 
-	// A stale version is refused with a conflict notice; the reply typed with
-	// it is still saved.
+	// A stale version is refused with a conflict notice, and the reply typed
+	// with it is not saved either, so a resubmit after a reload cannot post it
+	// twice.
 	stale := strconv.FormatInt(after.Version-1, 10)
 	code, location = post(t, client, action, url.Values{
 		"back": {back}, "expected_version": {stale}, "body": {"late reply"}, "status": {"Done"}, "do": {"apply"},
@@ -186,8 +187,8 @@ func TestUIRowActions(t *testing.T) {
 	if after.Status != "In Progress" {
 		t.Errorf("stale apply changed status to %s", after.Status)
 	}
-	if comments, _ = st.ListComments(issue.Key); len(comments) != 2 || comments[1].Body != "late reply" {
-		t.Errorf("reply lost on conflict: %+v", comments)
+	if comments, _ = st.ListComments(issue.Key); len(comments) != 1 {
+		t.Errorf("reply saved on conflict: %+v", comments)
 	}
 	code, body = fetch(t, client, ts.URL+location)
 	if code != http.StatusOK || !strings.Contains(body, "changed since this page was loaded") {
@@ -314,7 +315,7 @@ func TestUIQuickActionStale(t *testing.T) {
 
 func TestUIIssuePageActions(t *testing.T) {
 	ts, client, token, st := newUIEnv(t)
-	if _, err := st.EnsureLabel("ready", ""); err != nil {
+	if _, err := st.EnsureLabel("ready", "", "pm"); err != nil {
 		t.Fatal(err)
 	}
 	issue, _, err := st.CreateIssue(store.IssueInput{Title: "Target", Status: "Todo"}, "seo")
@@ -341,7 +342,7 @@ func TestUIIssuePageActions(t *testing.T) {
 func TestUIViewEditor(t *testing.T) {
 	ts, client, token, st := newUIEnv(t)
 	for _, name := range []string{"waiting", "ready"} {
-		if _, err := st.EnsureLabel(name, ""); err != nil {
+		if _, err := st.EnsureLabel(name, "", "pm"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -442,3 +443,28 @@ func newUIEnvOn(t *testing.T, st *store.Store) (*httptest.Server, *http.Client, 
 }
 
 func boolp(b bool) *bool { return &b }
+
+// A form's back field returns only to a path on this site. Browsers strip a
+// tab from a URL, so "/\t/host" would land on another host.
+func TestSafeBack(t *testing.T) {
+	for _, tc := range []struct {
+		raw, want string
+	}{
+		{"/ui/view/Queue?offset=100", "/ui/view/Queue?offset=100"},
+		{"/ui/issue/TSK-1#comments", "/ui/issue/TSK-1#comments"},
+		{"/", "/"},
+		{"/\t/evil.example/", "/"},
+		{"/\x01/evil.example/", "/"},
+		{"/\x7f/evil.example/", "/"},
+		{"/\r\n/evil.example/", "/"},
+		{"//evil.example/", "/"},
+		{"/\\evil.example/", "/"},
+		{"https://evil.example/", "/"},
+		{"ui/view/Queue", "/"},
+		{"", "/"},
+	} {
+		if got := safeBack(tc.raw); got != tc.want {
+			t.Errorf("safeBack(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,10 +13,10 @@ import (
 // nothing but the label endpoint creates one.
 func TestLabelResolution(t *testing.T) {
 	s := openTestStore(t)
-	if _, err := s.EnsureLabel("Agent-Ready", "#f00"); err != nil {
+	if _, err := s.EnsureLabel("Agent-Ready", "#f00", "pm"); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.EnsureLabel("agent-ready", "")
+	again, err := s.EnsureLabel("agent-ready", "", "pm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func TestLabelResolution(t *testing.T) {
 	if !slices.Equal(issue.Labels, []string{"Agent-Ready"}) {
 		t.Errorf("labels = %v, want the canonical spelling once", issue.Labels)
 	}
-	if _, err := s.EnsureLabel("   ", ""); err == nil {
+	if _, err := s.EnsureLabel("   ", "", "pm"); err == nil {
 		t.Error("a blank label name was accepted")
 	}
 }
@@ -94,7 +95,7 @@ func TestLabelColorValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := openTestStore(t)
-			label, err := s.EnsureLabel("ready", tc.color)
+			label, err := s.EnsureLabel("ready", tc.color, "pm")
 			if !tc.want {
 				if !errors.Is(err, ErrInvalidRef) {
 					t.Fatalf("color %q = %v, want ErrInvalidRef", tc.color, err)
@@ -113,13 +114,13 @@ func TestLabelColorValidation(t *testing.T) {
 	// The same check guards a recolor of a label that already exists, which
 	// is the other half of what EnsureLabel does.
 	s := openTestStore(t)
-	if _, err := s.EnsureLabel("ready", "#f00"); err != nil {
+	if _, err := s.EnsureLabel("ready", "#f00", "pm"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EnsureLabel("ready", "puce"); !errors.Is(err, ErrInvalidRef) {
+	if _, err := s.EnsureLabel("ready", "puce", "pm"); !errors.Is(err, ErrInvalidRef) {
 		t.Errorf("recolor with a bad value = %v, want ErrInvalidRef", err)
 	}
-	label, err := s.EnsureLabel("ready", "")
+	label, err := s.EnsureLabel("ready", "", "pm")
 	if err != nil || label.Color != "#f00" {
 		t.Errorf("label after a refused recolor = %+v, %v, want the old color kept", label, err)
 	}
@@ -188,5 +189,59 @@ func TestLabelGroupsConflictListIsCapped(t *testing.T) {
 	err := s.UpdateSetting("label_groups", `[["ready","blocked"]]`, "cli")
 	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "TSK-20 and 3 more") || strings.Contains(err.Error(), "TSK-21") {
 		t.Fatalf("UpdateSetting = %v, want the first 20 keys and 3 more", err)
+	}
+}
+
+// A label create and a color change each record an event naming the label and
+// the actor; ensuring a label that is already as asked records none.
+func TestEnsureLabelRecordsEvents(t *testing.T) {
+	s := openTestStore(t)
+	steps := []struct {
+		name, color, actor string
+		want               string
+	}{
+		{"ready", "#f00", "alex", "label.created"},
+		{"READY", "", "alex", ""},
+		{"ready", "#f00", "alex", ""},
+		{"ready", "#0f0", "builder", "label.updated"},
+		{"blocked", "", "builder", "label.created"},
+	}
+	var seen int
+	for _, step := range steps {
+		if _, err := s.EnsureLabel(step.name, step.color, step.actor); err != nil {
+			t.Fatalf("EnsureLabel(%q, %q) = %v", step.name, step.color, err)
+		}
+		events, err := s.ListAllEvents(EventFilter{Entity: "label", AllViews: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if step.want == "" {
+			if len(events) != seen {
+				t.Errorf("EnsureLabel(%q, %q) with nothing to change recorded %d event(s)", step.name, step.color, len(events)-seen)
+			}
+			continue
+		}
+		if len(events) != seen+1 {
+			t.Fatalf("EnsureLabel(%q, %q) recorded %d event(s), want 1", step.name, step.color, len(events)-seen)
+		}
+		seen++
+		got := events[len(events)-1]
+		if got.Action != step.want || got.Actor != step.actor || !strings.EqualFold(got.EntityKey, step.name) {
+			t.Errorf("event = %s by %q on %q, want %s by %q on %q", got.Action, got.Actor, got.EntityKey, step.want, step.actor, step.name)
+		}
+	}
+	events, err := s.ListEvents("label", 1, 0)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("ready's own feed = %d events, %v", len(events), err)
+	}
+	var before, after Label
+	if err := json.Unmarshal(events[0].Before, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(events[0].After, &after); err != nil {
+		t.Fatal(err)
+	}
+	if before.Color != "#f00" || after.Color != "#0f0" || events[1].Before != nil {
+		t.Errorf("recolor before %+v after %+v; create before %s", before, after, events[1].Before)
 	}
 }
