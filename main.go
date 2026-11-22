@@ -20,7 +20,7 @@ import (
 	"github.com/mikedclarke/trackd/internal/store"
 )
 
-const version = "0.7.0"
+const version = "0.8.0"
 
 func main() {
 	err := run(os.Args[1:])
@@ -393,11 +393,13 @@ func writeNewFile(path string, write func(io.Writer) error) (err error) {
 		return &os.PathError{Op: "open", Path: path, Err: os.ErrExist}
 	}
 	tmp := path + ".partial"
+	locked := true
 	f, err := store.LockFile(tmp)
 	switch {
 	case errors.Is(err, store.ErrLocked):
 		return fmt.Errorf("another export to %s is still running: %w", path, store.ErrLocked)
 	case errors.Is(err, store.ErrLockUnsupported):
+		locked = false
 		if f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err != nil {
 			return err
 		}
@@ -409,24 +411,40 @@ func writeNewFile(path string, write func(io.Writer) error) (err error) {
 			return err
 		}
 	}
-	// Deferred in this order so the temp file is removed while still locked.
-	defer f.Close()
+	// With the lock, the temp file is removed while still locked and closed
+	// after. Without one there is nothing to hold, and Windows cannot remove
+	// or link a file that is still open, so it is closed first.
 	defer func() {
-		if rmErr := os.Remove(tmp); err == nil && rmErr != nil {
+		if !locked {
+			f.Close()
+		}
+		rmErr := os.Remove(tmp)
+		if locked {
+			f.Close()
+		}
+		if err == nil && rmErr != nil {
 			err = rmErr
 		}
 	}()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if err := f.Truncate(0); err != nil {
-		return err
+	if locked {
+		// A taken-over leftover may hold old bytes under a wider mode.
+		if err := f.Chmod(0o600); err != nil {
+			return err
+		}
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
 	}
 	if err := write(f); err != nil {
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		return err
+	}
+	if !locked {
+		if err := f.Close(); err != nil {
+			return err
+		}
 	}
 	return os.Link(tmp, path)
 }

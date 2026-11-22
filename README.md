@@ -155,7 +155,7 @@ priority and label form. Every write goes through the same store path as the
 API, is attributed to the signed-in token, records the same audit event, and
 carries the issue version the page was rendered with, so a change that lost a
 race to another writer is refused with a notice instead of overwriting (the
-reply typed with it is still saved). Views can be created and edited from the
+reply typed with it is not saved either, so a resubmit cannot post it twice). Views can be created and edited from the
 board too (`+ view`). The issue page has the same action form beside its
 comment box. The only script on any page is the issue page's "use as reply"
 button.

@@ -142,7 +142,7 @@ with and the exit code the CLI turns it into.
 
 | Code | HTTP | CLI exit | When |
 |---|---|---|---|
-| `validation` | 400 | 2 | The request itself is malformed: an unknown JSON field or query parameter, a body that is not JSON, a value out of range, a patch with nothing in it, an unknown enum value such as a relation type or a project status |
+| `validation` | 400 | 2 | The request itself is malformed: an unknown JSON field or query parameter, a body that is not JSON, a value out of range, a comment body or issue description over 256 KiB, a patch with nothing in it, an unknown enum value such as a relation type or a project status |
 | `unauthorized` | 401 | 4 | No bearer token, or one that is unknown or revoked |
 | `forbidden` | 403 | 4 | A real write this token may not make: replacing or clearing a description needs an `admin` token, changing a view needs its owner or an `admin` token, editing a comment needs the token that wrote it (the one whose name is the comment's `actor`) or an `admin` token, and with `actor_from_token` on, naming an `actor` other than the token's own needs an `admin` token |
 | `not_found` | 404 | 3 | The issue, project, milestone, comment or view does not exist, or a view is private to another token or archived |

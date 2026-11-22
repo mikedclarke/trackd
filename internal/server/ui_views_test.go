@@ -468,3 +468,31 @@ func TestSafeBack(t *testing.T) {
 		}
 	}
 }
+
+// The change runs before the reply, so a reply over the store's length limit
+// is refused before the change: nothing is half-saved.
+func TestUIActionRefusesOverlongReplyBeforeChange(t *testing.T) {
+	ts, client, token, st := newUIEnv(t)
+	issue, _, err := st.CreateIssue(store.IssueInput{Title: "Target", Status: "Todo"}, "seo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, ts.URL, client, token)
+	code, location := post(t, client, ts.URL+"/ui/issue/"+issue.Key+"/action", url.Values{
+		"expected_version": {strconv.FormatInt(issue.Version, 10)}, "status": {"Done"},
+		"body": {strings.Repeat("x", store.MaxTextLength+1)},
+	})
+	if code != http.StatusSeeOther || !strings.Contains(location, "notice=error") {
+		t.Fatalf("action with an overlong reply = %d -> %q, want an error notice", code, location)
+	}
+	after, err := st.GetIssue(issue.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "Todo" || after.Version != issue.Version {
+		t.Errorf("the change was applied beside a refused reply: status %q, version %d", after.Status, after.Version)
+	}
+	if comments, err := st.ListComments(issue.Key); err != nil || len(comments) != 0 {
+		t.Errorf("comments = %d, %v; want none", len(comments), err)
+	}
+}

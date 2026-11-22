@@ -7,17 +7,95 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
+A security and data-safety release. Four changes can refuse a request that
+0.7.0 accepted: editing another token's comment, a comment or description over
+256 KiB, a comment idempotency key reused on another issue, and a milestone
+name that differs from an existing one only in case. The server commands'
+refusals also change exit code.
+
+### Security
+
+- A comment can be edited only by the token that wrote it or by an admin
+  token; any other token gets 403 `forbidden`. Before, any token could rewrite
+  any comment, and the comment kept its original author's name.
+- Every request body is capped at 1 MiB, the MCP endpoint and the web forms
+  included; before, only the REST API had the cap. A whole request, body
+  included, must also arrive within 30 seconds.
+- A comment body and an issue description are capped at 256 KiB, on create,
+  edit, append and replace. A longer one is refused as a validation error
+  (400, exit 2) naming both sizes. Imports are exempt.
+- Every web form post, the sign-in included, is refused when it comes from
+  another site (checked with `Sec-Fetch-Site`, then `Origin`); the sign-in had
+  no check before. A proxy that forwards its public host keeps working, and
+  with `base_url` set, that URL's origin is trusted.
+- The request log writes the path as it was sent, escaped, so an encoded line
+  break in a URL can no longer start a forged log line.
+- A form's return path refuses every control character, which closes a
+  redirect to another host through a tab.
+- The launchd plist written by `service install` sets `Umask` 077, so the
+  service's database, snapshots, dumps and log are readable by their owner
+  only. Exports and restored databases are created 0600.
+
+### Changed
+
+- Commits and WAL checkpoints on macOS now ask the drive for a full flush
+  (`fullfsync` and `checkpoint_fullfsync`), so a power cut cannot lose a write
+  already confirmed. Writes cost a few milliseconds more.
+- A comment idempotency key already used on another issue is refused with a
+  conflict (409, exit 5) instead of returning that issue's comment as if the
+  new one had been posted. A replay on the same issue still returns the stored
+  comment, whatever its body: a key names the thing, not the request text.
+- Creating or recoloring a label records a `label.created` or `label.updated`
+  event (`trackd events --entity label`), including the label the server adds
+  itself for `agent_label`; `POST /api/v1/labels` takes an optional `actor`.
+  Before, label writes left no audit event.
+- Milestone names are unique within a project without regard to case, among
+  unarchived milestones (create, rename, unarchive).
+- `token add`, `token revoke` and `setting set` refuse a path with no database
+  (`no database at <path>`, exit 3) instead of creating an empty one.
+- The server commands' expected refusals exit with the documented codes:
+  another trackd holding the database, an existing export or restore target,
+  or another export still running exit 5; a dump with no end record exits 2.
+- The MCP `save_issue` `status` field points at `list_statuses` instead of
+  listing a fixed set of names.
+
 ### Fixed
 
+- `restore` takes the database lock whether or not the file exists, so it is
+  refused while a server runs even after the database was moved aside. It
+  copies through `<db>.restoring` and publishes only once synced and verified.
+  The refusal now says to stop the server first.
 - `trackd export --out` after an export that was killed no longer fails with
   "file exists" on the `<file>.partial` it left behind: the next export to the
   same path takes that file over. An advisory lock on the temp file tells a
-  leftover from an export still writing to it, and a second export to the same
-  path while one runs is refused, as before.
+  leftover from an export still writing to it, every write goes through the
+  locked file, and a link or another file at that name is refused, never
+  followed. On Windows and on filesystems without advisory locks, a leftover
+  `.partial` cannot be told from a running export, so it is refused and has to
+  be removed by hand, as in 0.7.0.
 - Pruning (`trackd backup --keep`, `serve --backup-keep`) removes the hidden
   `.trackd-<stamp>.db.partial` a snapshot killed mid-write leaves in the backup
   directory, once it has gone an hour unwritten. Before, nothing removed it, and
   each one was the size of the database.
+- `import --dry-run` against a path with no database no longer creates and
+  migrates one.
+- A snapshot dated more than five minutes in the future no longer counts as a
+  fresh backup (which skipped every startup backup), and pruning removes it
+  first.
+- Two backups in the same second no longer delete each other's temp file.
+- A board action that combines a reply with a change no longer saves the reply
+  when the change is refused for a stale version, so submitting again after a
+  reload cannot post the reply twice.
+- The issue, project and milestone event feeds clamp `limit` to 1000, as the
+  global feed does.
+- `trackd comment <key>` accepts every key an issue prefix can make, including
+  lower case and digits in the prefix.
+- Issues imported from Linear store millisecond timestamps, so they sort and
+  filter correctly against native ones.
+- The README and CONCEPTS list the real dependency count, the eight default
+  statuses and the one release recipe; the unused goreleaser config is removed.
 
 ## [0.7.0] - 2026-11-02
 
@@ -163,7 +241,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   priority or status, an archive of an archived issue) is a no-op: the version
   does not move and no event is recorded, so a repeated or redundant write can
   no longer make another writer's `expected_version` fail.
-- Issue keys are matched case-insensitively (`trackd issue show gdl-12`), like
+- Issue keys are matched case-insensitively (`trackd issue show tsk-12`), like
   every other lookup already was.
 - `label` and `exclude_label` given with a view are added to the view's own
   labels instead of replacing them, so an explicit label narrows the view as

@@ -288,6 +288,12 @@ func (s *Server) uiIssueAction(w http.ResponseWriter, r *http.Request) {
 	}
 	body := strings.ReplaceAll(r.PostFormValue("body"), "\r\n", "\n")
 	reply := strings.TrimSpace(body) != ""
+	// The change runs before the reply, so a reply the store would refuse for
+	// its length is refused here, before anything is written.
+	if len(body) > store.MaxTextLength {
+		fail(fmt.Sprintf("the reply is %d bytes, over the %d byte limit", len(body), store.MaxTextLength))
+		return
+	}
 	if patchEmpty(patch) && !reply {
 		http.Redirect(w, r, back, http.StatusSeeOther)
 		return

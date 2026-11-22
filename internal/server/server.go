@@ -209,7 +209,7 @@ func tokenRole(r *http.Request) string {
 // when the setting is empty or the caller is an admin, and never adds a label a
 // caller already passed. The label is created if missing, as a write by the
 // calling token, because a create rejects labels that do not already exist.
-func (s *Server) agentLabel(tokenName, role string, labels []string) ([]string, error) {
+func (s *Server) agentLabel(actor, role string, labels []string) ([]string, error) {
 	name, err := s.store.Setting("agent_label")
 	if err != nil {
 		return nil, err
@@ -218,7 +218,7 @@ func (s *Server) agentLabel(tokenName, role string, labels []string) ([]string, 
 	if name == "" || role == roleAdmin {
 		return labels, nil
 	}
-	label, err := s.store.EnsureLabel(name, "", tokenName)
+	label, err := s.store.EnsureLabel(name, "", actor)
 	if err != nil {
 		return nil, err
 	}

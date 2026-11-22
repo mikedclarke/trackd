@@ -1005,7 +1005,7 @@ func cmdEvents(args []string) error {
 	common := addCommon(fs)
 	since := fs.String("since", "", "only events at or after this RFC3339 time")
 	afterID := fs.Int64("after-id", 0, "only events after this event id (the cursor from a previous run)")
-	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone, token, setting or view (a comment or a relation is recorded against its issue)")
+	entity := fs.String("entity", "", "filter by entity type: issue, project, milestone, label, token, setting or view (a comment or a relation is recorded against its issue)")
 	var keys stringSlice
 	fs.Var(&keys, "key", "only this issue's events (repeatable, up to 100: several issues' histories in one request)")
 	limit := fs.Int("limit", 0, "maximum events (default 100, max 1000)")

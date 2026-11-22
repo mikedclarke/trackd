@@ -53,8 +53,9 @@ The data model and the rules trackd enforces on it. The README has the short ver
   `planned`, `started`, `paused`, `completed` and `canceled`, and optional
   `start_date`, `target_date` and `completed_at` dates.
 - **Comments** can reply to another comment (`--parent ID`) and can be edited
-  (`trackd comment edit ID --body ...`). An edit keeps the original in the audit
-  trail.
+  (`trackd comment edit ID --body ...`) by the token that wrote them or by an
+  admin token. An edit keeps the original in the audit trail. A comment body
+  and an issue description are each capped at 256 KiB.
 - **Views** are saved issue filters with a name, so a queue can be opened by
   name from any interface: `trackd view create "Waiting on me" --label
   waiting --status Todo --status "In Progress" --order-by created`, then
